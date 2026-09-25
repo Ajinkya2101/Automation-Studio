@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Automation Studio</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 2a10 10 0 1 0 10 10h-2a8 8 0 1 1-2.34-5.66L15 9h7V2l-2.93 2.93A9.97 9.97 0 0 0 12 2Zm-1 6v5l4 2.5.9-1.5-2.9-1.8V8h-2Z"/></svg>
+      <span>Automation Studio</span><span class="tag">Prototype</span>
+    </div>
+    <div class="top-actions">
+      <span id="status-pill" class="pill idle">Idle</span>
+      <a href="/mail/login" target="_blank" rel="noopener">Open Acme Mail ↗</a>
+      <a href="/api/sample?name=acme">Sample: Acme Mail</a>
+      <a href="/api/sample?name=outlook">Sample: Outlook</a>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <label class="dropzone" id="dropzone">
+        <input type="file" id="file-input" accept=".xlsx" hidden>
+        <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path fill="currentColor" d="M11 16V7.8l-3.3 3.3-1.4-1.4L12 4l5.7 5.7-1.4 1.4L13 7.8V16h-2Zm-6 4v-5h2v3h10v-3h2v5H5Z"/></svg>
+        <strong>Upload test Excel</strong>
+        <span>Drop an .xlsx here or click to browse</span>
+      </label>
+      <div class="side-title">Test cases</div>
+      <ul id="case-list" class="case-list"></ul>
+    </aside>
+    <div class="main-col">
+      <!-- Live view of the automated browser (container only). Kept outside #main so
+           re-rendering the page never reconnects it. -->
+      <section id="screen" class="card screen" hidden>
+        <div class="screen-head">
+          <span class="dotlive"></span><b id="screen-title">Live browser</b>
+          <span class="muted" id="screen-hint"></span>
+          <a id="screen-pop" target="_blank" rel="noopener">Open in new tab ↗</a>
+        </div>
+        <iframe id="screen-frame" title="Live view of the automated browser"></iframe>
+      </section>
+      <main id="main"></main>
+    </div>
+  </div>
+
+  <div id="lightbox" class="lightbox" hidden><img alt="Step screenshot"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
