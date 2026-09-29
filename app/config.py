@@ -28,4 +28,4 @@ IN_CONTAINER = bool(os.environ.get("STUDIO_IN_CONTAINER"))
 SCREEN = os.environ.get("STUDIO_SCREEN", "1600x900")
 
 # How long replay waits for an element or a check before failing a step.
-ACTION_TIMEOUT_MS = int(os.environ.get("STUDIO_ACTION_TIMEOUT_MS", "15000"))
+ACTION_TIMEOUT_MS = int(os.environ.get("STUDIO_ACTION_TIMEOUT_MS", "20000"))

@@ -3,12 +3,13 @@
 - Automation_Email.xlsx : TS_EML001 against the built-in Acme Mail demo app
 - Outlook_Email.xlsx    : TS_OUT001 sends a real email with Outlook on the web
 """
+import sys
 from pathlib import Path
 
-import openpyxl
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-
 HERE = Path(__file__).parent
+sys.path.insert(0, str(HERE.parent))  # run as a script from any folder
+
+from app.excel_io import build_workbook, parse_test_data  # noqa: E402
 
 ACME = dict(
     path=HERE / "Automation_Email.xlsx", case_id="TS_EML001", role="User",
@@ -65,57 +66,11 @@ OUTLOOK = dict(
 
 
 def build(path: Path, case_id: str, role: str, title: str, description: str, heading: str, steps) -> None:
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = case_id
-    bold = Font(bold=True)
-    head_fill = PatternFill("solid", fgColor="1F3A5F")
-    label_fill = PatternFill("solid", fgColor="DCE6F1")
-    thin = Side(style="thin", color="B7C3D0")
-    box = Border(left=thin, right=thin, top=thin, bottom=thin)
-    wrap = Alignment(wrap_text=True, vertical="top")
-
-    first, last = 11, 10 + len(steps)
-    ws["A1"], ws["F1"] = "Unit Test Case", "Summary"
-    ws["G1"] = f'=IFERROR(COUNTIF($H${first}:$H${last},"Pass")/COUNTA($A${first}:$A${last}),0)'
-    ws["G1"].number_format = "0%"
-    ws["A1"].font = Font(bold=True, size=13)
-    meta = [("Test Case ID", case_id), ("Test Case Title", title), ("Test Case Description", description),
-            ("Tester Name", None), ("Test Location (Office)", None), ("Test Date & Time", None)]
-    for i, (label, value) in enumerate(meta, start=2):
-        ws.cell(i, 1, label).font = bold
-        ws.cell(i, 1).fill = label_fill
-        ws.cell(i, 2, value)
-    ws["H6"], ws["H7"] = "Overall Coverage Status", "Overall Pass / Fail Status"
-
-    headers = ["Test Step ID", "Process Step", "Role", "Test Step Description", "Test Data",
-               "Expected Results", "Observed Results", "Status", "SR Number/Incident ID(s)",
-               "Notes (e.g. Incident description)"]
-    for c, h in enumerate(headers, start=1):
-        cell = ws.cell(9, c, h)
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = head_fill
-        cell.alignment = Alignment(wrap_text=True, vertical="center")
-        cell.border = box
-
-    ws.cell(10, 1, case_id).font = bold
-    ws.cell(10, 3, role)
-    ws.cell(10, 4, heading).font = bold
-    for i, (name, desc, data, expected) in enumerate(steps, start=1):
-        r = 10 + i
-        row = (f"{case_id}.{i}", name, role, desc, data or None, expected)
-        for c, v in enumerate(row, start=1):
-            cell = ws.cell(r, c, v)
-            cell.alignment = wrap
-            cell.border = box
-        for c in range(len(row) + 1, len(headers) + 1):
-            ws.cell(r, c).border = box
-            ws.cell(r, c).alignment = wrap
-
-    for col, width in zip("ABCDEFGHIJ", (14, 26, 14, 50, 44, 34, 34, 10, 16, 30)):
-        ws.column_dimensions[col].width = width
-    ws.freeze_panes = "A10"
-    wb.save(path)
+    case = {"id": case_id, "sheet": case_id, "title": title, "description": description, "steps": [
+        {"step_id": f"{case_id}.{i}", "name": name, "role": role, "description": desc,
+         "data": parse_test_data(data), "expected": expected}
+        for i, (name, desc, data, expected) in enumerate(steps, start=1)]}
+    build_workbook(path, case, heading)
     print("written", path)
 
 

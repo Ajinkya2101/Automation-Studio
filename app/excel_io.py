@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 import openpyxl
-from openpyxl.styles import PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 COLUMN_ALIASES = {
     "step_id": ("test step id", "step id"),
@@ -167,6 +167,75 @@ def parse_workbook(path: Path) -> tuple[list[dict], list[str]]:
     if not cases:
         raise WorkbookError("No test cases found. " + " ".join(warnings))
     return cases, warnings
+
+
+TEMPLATE_HEADERS = ["Test Step ID", "Process Step", "Role", "Test Step Description", "Test Data",
+                    "Expected Results", "Observed Results", "Status", "SR Number/Incident ID(s)",
+                    "Notes (e.g. Incident description)"]
+
+
+def data_text(data: dict[str, str]) -> str:
+    return "\n".join(f"{k}: {v}" for k, v in data.items())
+
+
+def build_workbook(path: Path, case: dict, heading: str = "") -> None:
+    """Write a test case as a workbook in the team template.
+
+    Used for the sample workbooks and for tests recorded without an Excel file,
+    so every test has a script the team can read, edit and upload again.
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = case["sheet"][:31]
+    bold = Font(bold=True)
+    head_fill = PatternFill("solid", fgColor="1F3A5F")
+    label_fill = PatternFill("solid", fgColor="DCE6F1")
+    thin = Side(style="thin", color="B7C3D0")
+    box = Border(left=thin, right=thin, top=thin, bottom=thin)
+    wrap = Alignment(wrap_text=True, vertical="top")
+    steps = case["steps"]
+    role = steps[0].get("role", "") if steps else ""
+
+    first, last = 11, 10 + max(len(steps), 1)
+    ws["A1"], ws["F1"] = "Unit Test Case", "Summary"
+    ws["G1"] = f'=IFERROR(COUNTIF($H${first}:$H${last},"Pass")/COUNTA($A${first}:$A${last}),0)'
+    ws["G1"].number_format = "0%"
+    ws["A1"].font = Font(bold=True, size=13)
+    meta = [("Test Case ID", case["id"]), ("Test Case Title", case["title"]),
+            ("Test Case Description", case.get("description") or None),
+            ("Tester Name", None), ("Test Location (Office)", None), ("Test Date & Time", None)]
+    for i, (label, value) in enumerate(meta, start=2):
+        ws.cell(i, 1, label).font = bold
+        ws.cell(i, 1).fill = label_fill
+        ws.cell(i, 2, value)
+    ws["H6"], ws["H7"] = "Overall Coverage Status", "Overall Pass / Fail Status"
+
+    for c, h in enumerate(TEMPLATE_HEADERS, start=1):
+        cell = ws.cell(9, c, h)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = head_fill
+        cell.alignment = Alignment(wrap_text=True, vertical="center")
+        cell.border = box
+
+    ws.cell(10, 1, case["id"]).font = bold
+    ws.cell(10, 3, role or None)
+    ws.cell(10, 4, heading or case["title"]).font = bold
+    for r, s in enumerate(steps, start=first):
+        row = (s["step_id"], s["name"], s.get("role") or None, s.get("description") or None,
+               data_text(s.get("data", {})) or None, s.get("expected") or None)
+        for c, v in enumerate(row, start=1):
+            cell = ws.cell(r, c, v)
+            cell.alignment = wrap
+            cell.border = box
+        for c in range(len(row) + 1, len(TEMPLATE_HEADERS) + 1):
+            ws.cell(r, c).border = box
+            ws.cell(r, c).alignment = wrap
+
+    for col, width in zip("ABCDEFGHIJ", (14, 26, 14, 50, 44, 34, 34, 10, 16, 30)):
+        ws.column_dimensions[col].width = width
+    ws.freeze_panes = "A10"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(path)
 
 
 def write_results(src: Path, dst: Path, sheet: str, run: dict) -> None:

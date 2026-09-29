@@ -2,6 +2,7 @@
 Acme Mail target app, all served by one FastAPI process."""
 import shutil
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -10,18 +11,34 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import mockmail, storage
-from .actions import start_url
+from .actions import case_target
 from .browser import signed_in_at
 from .config import (DATA_DIR, IN_CONTAINER, LIVE_VIEW_URL, OUTLOOK_WORKBOOK, SAMPLE_WORKBOOK,
                      STATIC_DIR, TARGET_START_URL)
 from .events import BusyError, sessions
-from .excel_io import WorkbookError, parse_workbook
+from .excel_io import WorkbookError, build_workbook, parse_workbook
 from .recorder import record_session, signin_session
 from .replayer import run_session
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="Automation Studio (Prototype)")
+
+
+@app.middleware("http")
+async def always_current_dashboard(request: Request, call_next):
+    """Make browsers re-check the dashboard files on every load.
+
+    Without this, a browser can keep an old app.js after an update (the new page
+    then shows buttons the old script does not handle). With no-cache the check
+    is cheap: an unchanged file gets a 304 reply via its ETag.
+    """
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 app.include_router(mockmail.router)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/artifacts", StaticFiles(directory=DATA_DIR), name="artifacts")
@@ -32,6 +49,11 @@ class RunRequest(BaseModel):
     slow_mo: int = 250
     reset_mailbox: bool = True
     data: dict[str, str] = {}
+
+
+class FreeformRequest(BaseModel):
+    title: str = ""
+    url: str = ""
 
 
 def _suite_case(suite_id: str, case_id: str) -> tuple[dict, dict]:
@@ -112,12 +134,40 @@ async def upload(file: UploadFile = File(...)):
     return {"suite_id": suite["id"], "cases": [c["id"] for c in cases], "warnings": warnings}
 
 
+@app.post("/api/freeform")
+def create_freeform(req: FreeformRequest):
+    """A test without an Excel file: the steps are created while the user records."""
+    url = req.url.strip() or TARGET_START_URL
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "The start URL must begin with http:// or https://")
+    case_id = f"REC-{datetime.now():%Y%m%d-%H%M%S}"
+    title = req.title.strip() or f"Recorded test {datetime.now():%d %b %H:%M}"
+    case = {"id": case_id, "sheet": case_id, "title": title, "description": f"Recorded without Excel on {url}",
+            "steps": [], "freeform": True, "start_url": url}
+    suite = {"id": storage.new_id("suite"), "filename": "Recorded without Excel", "source": "recording",
+             "uploaded_at": storage.now_iso(), "warnings": [], "cases": [case]}
+    storage.save_suite(suite)
+    build_workbook(storage.workbook_path(suite["id"]), case)
+    return {"suite_id": suite["id"], "case_id": case_id}
+
+
+@app.get("/api/suites/{suite_id}/workbook")
+def suite_workbook(suite_id: str):
+    """The test script as Excel: the uploaded file, or the one written for a recorded test."""
+    suite = storage.load_suite(suite_id)
+    path = storage.workbook_path(suite_id)
+    if not suite or not path.exists():
+        raise HTTPException(404, "Workbook not found")
+    name = suite["filename"] if suite.get("source") != "recording" else f"{suite['cases'][0]['id']}.xlsx"
+    return FileResponse(path, filename=name)
+
+
 @app.get("/api/suites/{suite_id}/cases/{case_id}")
 def case_detail(suite_id: str, case_id: str):
     suite, case = _suite_case(suite_id, case_id)
-    target = start_url(case["steps"], TARGET_START_URL)
+    target = case_target(case, TARGET_START_URL)
     return {
-        "suite": {k: suite[k] for k in ("id", "filename", "uploaded_at", "warnings")},
+        "suite": {k: suite.get(k) for k in ("id", "filename", "uploaded_at", "warnings", "source")},
         "case": case,
         "target": {"url": target, "is_demo": target == TARGET_START_URL,
                    "has_profile": bool(signed_in_at(target)), "signed_in_at": signed_in_at(target)},

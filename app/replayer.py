@@ -31,6 +31,74 @@ class Stopped(Exception):
 ICON_GLYPHS = re.compile("[-]")  # icon-font characters (private use area)
 GENERATED_ID = re.compile(r"#[^\s>]*\d")        # ids like #splitButton-r44 or #\35 88 change every load
 STRUCTURAL_GRACE_S = 5  # how long semantic locators get before CSS fallbacks are allowed
+SETTLE_MAX_S = 15        # longest wait for the app to finish reacting to an action
+NET_QUIET_S = 0.5        # no app requests in flight for this long = network settled
+DOM_QUIET_MS = 400       # no DOM changes for this long = screen settled
+
+# Resolves true once the page looks idle: no DOM changes for `quiet` ms, and the
+# app's own busy flags (Oracle ADF / Oracle JET, when present) report ready.
+SETTLE_JS = """([quiet, max]) => new Promise(resolve => {
+  const start = Date.now();
+  let last = Date.now();
+  const obs = new MutationObserver(() => { last = Date.now(); });
+  obs.observe(document, {subtree: true, childList: true, attributes: true, characterData: true});
+  const busy = () => {
+    try { if (window.AdfPage && AdfPage.PAGE && !AdfPage.PAGE.isSynchronizedWithServer()) return true; } catch (e) {}
+    try { if (window.oj && oj.Context && !oj.Context.getPageContext().getBusyContext().isReady()) return true; } catch (e) {}
+    return document.readyState !== 'complete';
+  };
+  (function tick() {
+    const now = Date.now();
+    if ((now - last >= quiet && !busy()) || now - start >= max) { obs.disconnect(); resolve(); return; }
+    setTimeout(tick, 100);
+  })();
+})"""
+
+
+class _Network:
+    """Counts the app's in-flight requests, so replay can wait for AJAX updates to finish.
+
+    A click that swaps the screen in place (no navigation) is only done once the
+    requests it started are answered, just as a person waits for the new screen
+    before acting on it.
+    """
+    TRACKED = {"document", "xhr", "fetch", "script"}
+
+    def __init__(self, ctx):
+        self.inflight = set()
+        self.last = time.time()
+        ctx.on("request", self._start)
+        ctx.on("requestfinished", self._end)
+        ctx.on("requestfailed", self._end)
+
+    def _start(self, req):
+        if req.resource_type in self.TRACKED:
+            self.inflight.add(req)
+            self.last = time.time()
+
+    def _end(self, req):
+        if req in self.inflight:
+            self.inflight.discard(req)
+            self.last = time.time()
+
+
+def _settle(page: Page, net: "_Network | None") -> None:
+    """Wait until the app has finished reacting to the last action (best effort, never fails)."""
+    deadline = time.time() + SETTLE_MAX_S
+    page.wait_for_timeout(150)  # let the action's own requests and DOM updates start
+    if net:
+        # Long-polling requests never finish, so give up on the network after the deadline.
+        while time.time() < deadline and (net.inflight or time.time() - net.last < NET_QUIET_S):
+            page.wait_for_timeout(100)
+    remaining = int((deadline - time.time()) * 1000)
+    if remaining > 0:
+        try:
+            page.evaluate(SETTLE_JS, [DOM_QUIET_MS, remaining])
+        except Exception:  # page navigated mid-check: wait for the new one to load instead
+            try:
+                page.wait_for_load_state("load", timeout=max(remaining, 1000))
+            except Exception:
+                pass
 
 
 def _clean(s: str) -> str:
@@ -50,12 +118,13 @@ def _candidates(recorded: list[dict]) -> list[dict]:
       element, or nothing, on the next page load.
     - Role locators ignore anything under aria-hidden. Apps such as Outlook set
       aria-hidden on the whole page while a popup is open, so each role locator
-      also gets an include-hidden twin and an [aria-label] CSS twin, used only
-      when the element is actually visible.
+      also gets an include-hidden twin and an [aria-label] CSS twin.
+    - Only visible elements count. A text or CSS match can be an element that is
+      in the page but hidden, e.g. a link inside a collapsed menu group.
     """
     out = []
     for c in recorded:
-        c = dict(c)
+        c = {**c, "must_be_visible": True}
         if c["kind"] == "css":
             if GENERATED_ID.search(c["value"]):
                 continue
@@ -90,17 +159,19 @@ def _build(page: Page, c: dict):
     return page.locator(v)
 
 
-def _resolve(page: Page, candidates: list[dict], target: str):
-    """First candidate matching exactly one element wins; waits while the page loads.
+def _resolve(page: Page, candidates: list[dict], target: str, timeout_ms: int = ACTION_TIMEOUT_MS,
+             css_grace_s: float = STRUCTURAL_GRACE_S):
+    """First candidate matching exactly one visible element wins; waits while the page loads.
 
     Semantic locators (role, label, text) are accepted at once. Structural CSS
     fallbacks only after a grace period, so a CSS path that happens to match
     something while the page is still loading cannot win the race.
     """
     start = time.time()
-    deadline = start + ACTION_TIMEOUT_MS / 1000
+    deadline = start + timeout_ms / 1000
+    hidden_only = False
     while True:
-        allow_css = time.time() - start >= STRUCTURAL_GRACE_S
+        allow_css = time.time() - start >= css_grace_s
         fallback = None
         for i, c in enumerate(candidates):
             if c["kind"] == "css" and not allow_css:
@@ -110,7 +181,9 @@ def _resolve(page: Page, candidates: list[dict], target: str):
                 n = loc.count()
                 if n and c.get("must_be_visible"):
                     loc = loc.filter(visible=True)
-                    n = loc.count()
+                    visible = loc.count()
+                    hidden_only = hidden_only or visible == 0
+                    n = visible
             except Exception:  # page mid-navigation
                 continue
             if n == 1:
@@ -120,13 +193,67 @@ def _resolve(page: Page, candidates: list[dict], target: str):
         if fallback:
             return fallback
         if time.time() > deadline:
-            raise StepFailed(f"Could not find {target} on the page "
-                             f"(tried {len(candidates)} locator(s)).")
+            if hidden_only:
+                raise StepFailed(
+                    f"Found {target}, but it stayed hidden (for example inside a collapsed menu group or a closed "
+                    "panel). The recording is probably missing the click that opens it: re-record this step "
+                    "and click the menu group or panel header before the item.")
+            raise StepFailed(f"Could not find {target} on the page (tried {len(candidates)} locator(s)).")
         page.wait_for_timeout(250)
 
 
-def _execute(page: Page, a: dict, data: dict) -> tuple[str, int]:
-    """Run one action. Returns (locator used, candidate index)."""
+def _scroll(page: Page, a: dict) -> str:
+    """Best effort: repeat a recorded scroll so lists that load more items on scroll do so.
+
+    A scroll never fails a step: if the scrolled area cannot be found, the next
+    action still gets its chance (Playwright scrolls to elements before clicking).
+    """
+    x, y = int(a.get("x", 0)), int(a.get("y", 0))
+    if a.get("page"):
+        page.evaluate("([x, y]) => window.scrollTo(x, y)", [x, y])
+        page.wait_for_timeout(300)
+        return "page"
+    try:
+        # Scroll areas rarely have a label or short text, so their CSS path is allowed at once.
+        loc, i = _resolve(page, _candidates(a.get("locators", [])), a.get("target", "area"),
+                          timeout_ms=6000, css_grace_s=0)
+    except StepFailed:
+        return "skipped: scrolled area not found"
+    loc.evaluate("(el, [x, y]) => { el.scrollLeft = x; el.scrollTop = y; }", [x, y])
+    page.wait_for_timeout(300)  # let lazily loaded items appear
+    return locator_label(_candidates(a.get("locators", []))[i])
+
+
+def _execute(page: Page, a: dict, data: dict, net: "_Network | None" = None) -> tuple[str, int]:
+    """Run one action and wait for the app to settle. Returns (locator used, candidate index)."""
+    result = _perform(page, a, data)
+    if a["type"] not in ("expect_text", "scroll"):
+        _settle(page, net)
+    if a["type"] == "fill":
+        _check_fill(page, a, data, net)
+    return result
+
+
+def _check_fill(page: Page, a: dict, data: dict, net: "_Network | None") -> None:
+    """Make sure typed text is still in the field once the app settles.
+
+    If the screen was replaced while typing (the field came from the previous
+    screen), type it again into the field that is there now.
+    """
+    value = substitute(a.get("value", ""), data)
+    candidates = _candidates(a["locators"])
+    try:
+        loc, _ = _resolve(page, candidates, a.get("target", "field"), timeout_ms=5000, css_grace_s=0)
+        if loc.input_value(timeout=2000) == value:
+            return
+    except Exception:
+        return  # not a plain input (e.g. a rich editor); nothing reliable to compare
+    loc, _ = _resolve(page, candidates, a.get("target", "field"))
+    loc.fill(value)
+    _settle(page, net)
+
+
+def _perform(page: Page, a: dict, data: dict) -> tuple[str, int]:
     t = a["type"]
     if t == "goto":
         page.goto(substitute(a["url"], data))
@@ -138,6 +265,8 @@ def _execute(page: Page, a: dict, data: dict) -> tuple[str, int]:
         except AssertionError:
             raise StepFailed(f"\"{text}\" did not appear within {ACTION_TIMEOUT_MS // 1000}s") from None
         return f'text contains "{text}"', 0
+    if t == "scroll":
+        return _scroll(page, a), 0
 
     candidates = _candidates(a["locators"])
     loc, idx = _resolve(page, candidates, a.get("target", "element"))
@@ -209,6 +338,7 @@ def run_session(session: Session, suite: dict, case: dict, recording: dict,
                                slow_mo=slow_mo if headed else 0)
         page = first_page(browser)
         page.set_default_timeout(ACTION_TIMEOUT_MS)
+        net = _Network(browser)
 
         for idx, (rstep, res) in enumerate(zip(recording["steps"], run["steps"])):
             sid = rstep["step_id"]
@@ -227,7 +357,7 @@ def run_session(session: Session, suite: dict, case: dict, recording: dict,
                     text = describe(a, test_data)
                     t_act = time.time()
                     try:
-                        used, cand = _execute(page, a, test_data)
+                        used, cand = _execute(page, a, test_data, net)
                     except (StepFailed, MissingDataError) as exc:
                         raise StepFailed(f"{text}: {exc}") from exc
                     except Stopped:

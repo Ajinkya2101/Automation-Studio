@@ -30,6 +30,16 @@ Click inside the view to type into it. Both ports are published on `localhost` o
 The project folder is mounted into the container, so recordings, runs and the saved
 browser sign-ins live in `data/` on your machine and survive container rebuilds.
 
+## Record without Excel
+
+1. Click **Record without Excel**, give the test a name and a start URL (empty = Acme Mail).
+2. For a site that needs a sign-in, click **Sign in** first.
+3. Click **Record steps** and do the test. On the toolbar, name each step (optional), use
+   **+ Add check**, click **Next step** to start a new step, and **Finish recording** at the end.
+4. The steps, their test data (every typed value, named after its field) and an Excel test
+   script are created from the recording. Download the script from the **Steps** tab.
+5. Click **Run automated**. You can change any typed value in the run form, including `{now}`.
+
 ## Demo 1: Acme Mail (safe)
 
 1. **Upload** `Automation_Email.xlsx` (drag it onto *Upload test Excel*).
@@ -92,6 +102,8 @@ Test data tokens: `{now}` (2026-09-25 14:32:10), `{date}`, `{time}`, `{stamp}` (
 ```
 .venv\Scripts\python tests\smoke_test.py         # Acme Mail: record, run, changed data, failure
 .venv\Scripts\python tests\rich_editor_test.py   # Outlook-style editors, recipient Enter, {now} subjects
+.venv\Scripts\python tests\freeform_test.py      # record without Excel: steps, test data, Excel script, runs
+.venv\Scripts\python tests\menu_scroll_test.py   # Fusion-style menus: script-driven groups, scroll-loaded items
 ```
 
 ## Prototype limits

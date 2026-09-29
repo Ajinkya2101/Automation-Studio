@@ -145,11 +145,81 @@
     if (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete') markTyped(e);
   }, true);
   ['input', 'paste', 'cut', 'drop'].forEach(t => document.addEventListener(t, markTyped, true));
-  document.addEventListener('mousedown', e => { if (!fromToolbar(e)) flushTyping(); }, true);
-  window.addEventListener('pagehide', flushTyping, true);
+  document.addEventListener('mousedown', e => { if (!fromToolbar(e)) { flushScroll(); flushTyping(); } }, true);
+  window.addEventListener('pagehide', () => { flushScroll(); flushTyping(); }, true);
+
+  // ---- scrolling ------------------------------------------------------------
+  // Replay scrolls to elements by itself before clicking, but some lists only
+  // load more items after the user scrolls. So the final position of each
+  // scroll (page or panel) is recorded once the user stops scrolling.
+  let scrollTimer = null, scrollEl = null;
+  const isPageScroller = el => el === document.scrollingElement || el === document.documentElement || el === document.body;
+  function flushScroll() {
+    if (!scrollEl) return;
+    clearTimeout(scrollTimer);
+    const el = scrollEl;
+    scrollEl = null;
+    if (!el.isConnected) return;
+    const page = isPageScroller(el);
+    // Name a scroll area by its label or id; its text is usually the whole list.
+    const label = clean(el.getAttribute('aria-label'));
+    const target = page ? 'page' : label ? `area "${label.slice(0, 60)}"`
+      : `area ${stableId(el.id) ? '#' + el.id : el.tagName.toLowerCase()}`;
+    send({ type: 'scroll', page, x: Math.round(el.scrollLeft), y: Math.round(el.scrollTop),
+           target, locators: page ? [] : locators(el) });
+  }
+  // Only scrolls the user makes count. Pages also scroll by themselves (an element
+  // brought into view, a panel reset when it closes); those are not recorded.
+  let userScrollAt = 0;
+  const SCROLL_KEYS = ['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'ArrowDown', ' '];
+  const userScrolls = () => { userScrollAt = Date.now(); };
+  window.addEventListener('wheel', e => { if (!fromToolbar(e)) userScrolls(); }, { capture: true, passive: true });
+  window.addEventListener('touchmove', e => { if (!fromToolbar(e)) userScrolls(); }, { capture: true, passive: true });
+  document.addEventListener('keydown', e => {
+    if (!fromToolbar(e) && SCROLL_KEYS.includes(e.key) && !fieldOf(e.target)) userScrolls();
+  }, true);
+  document.addEventListener('mousedown', e => {
+    // A press on a scrollbar lands outside the element's content box.
+    const el = e.target;
+    if (!el || el.nodeType !== 1 || fromToolbar(e)) return;
+    const scrollable = el.scrollHeight > el.clientHeight || el.scrollWidth > el.clientWidth;
+    if (scrollable && el.clientWidth > 0 && (e.offsetX > el.clientWidth || e.offsetY > el.clientHeight)) userScrolls();
+  }, true);
+
+  document.addEventListener('scroll', e => {
+    if (fromToolbar(e)) return;
+    const el = e.target === document ? (document.scrollingElement || document.documentElement) : e.target;
+    if (!el || el.nodeType !== 1) return;
+    if (el !== scrollEl && Date.now() - userScrollAt > 500) return; // not caused by the user
+    if (scrollEl && scrollEl !== el) flushScroll();
+    scrollEl = el;
+    clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(flushScroll, 400);
+  }, true);
+
+  const flushPending = () => { flushScroll(); flushTyping(); };
+
+  // Many apps (Oracle Fusion menus, tiles, panels) make plain elements clickable
+  // with scripts instead of using buttons or links. Such an element shows the
+  // pointer cursor, or has tabindex / aria-expanded. Take the largest element
+  // that still looks like one control, so its text identifies it.
+  function clickableOf(target) {
+    const std = target.closest(INTERACTIVE);
+    if (std) return std;
+    let el = null;
+    for (let a = target, i = 0; a && a !== document.body && i < 6; a = a.parentElement, i++) {
+      if (a.hasAttribute('tabindex') || a.hasAttribute('aria-expanded') || getComputedStyle(a).cursor === 'pointer') { el = a; break; }
+    }
+    if (!el) return null;
+    while (el.parentElement && el.parentElement !== document.body &&
+           getComputedStyle(el.parentElement).cursor === 'pointer' &&
+           clean(el.parentElement.innerText).length <= 80) el = el.parentElement;
+    return el;
+  }
 
   document.addEventListener('click', e => {
     if (fromToolbar(e)) return;
+    flushScroll();
     flushTyping();
     if (checkMode) {
       e.preventDefault(); e.stopPropagation();
@@ -159,10 +229,11 @@
       if (text) send({ type: 'expect_text', text, target: describe(el), locators: locators(el) });
       return;
     }
-    const el = e.target.closest(INTERACTIVE);
+    const el = clickableOf(e.target);
     if (!el) return;
     const role = roleOf(el);
     if (role === 'textbox' || role === 'combobox') return; // focusing a field; typing is captured on change
+    if (fieldOf(el)) return;
     send({ type: 'click', target: describe(el), locators: locators(el) });
   }, true);
 
@@ -241,9 +312,15 @@
     .check{background:#374151;color:#fde68a}.check.on{background:#f59e0b;color:#111827}
     .next{background:#2563eb;color:#fff}.finish{background:#16a34a;color:#fff}
     .note{font-size:12px;color:#fcd34d;margin-bottom:8px}
-    .done{padding:16px 14px;color:#bbf7d0}`;
+    .done{padding:16px 14px;color:#bbf7d0}
+    .stepname{display:block;width:100%;box-sizing:border-box;font:inherit;font-size:14px;font-weight:600;margin:4px 0 8px;
+      padding:6px 9px;border-radius:7px;border:1px solid #374151;background:#0b1220;color:#f9fafb}
+    .stepname::placeholder{color:#6b7280;font-weight:400}
+    .row + .row{margin-top:8px}`;
 
   let root = null;
+  let stepName = ''; // free-form mode: the name typed for the current step
+  let nameTimer = null;
   function render() {
     if (!root) return;
     if (!state) { root.innerHTML = `<style>${STYLE}</style>`; return; }
@@ -264,6 +341,7 @@ Nothing you type here is recorded.</div>
         <div class="done">All steps recorded. You can close this window.</div></div>`;
       return;
     }
+    if (state.freeform) { renderFreeform(); return; }
     const last = state.idx === state.total - 1;
     const data = Object.entries(state.test_data || {});
     root.innerHTML = `<style>${STYLE}</style><div class="bar">
@@ -283,17 +361,57 @@ Nothing you type here is recorded.</div>
     </div>`;
     root.getElementById('toggle').onclick = () => { collapsed = !collapsed; render(); };
     if (collapsed) return;
-    root.getElementById('check').onclick = () => { flushTyping(); setCheckMode(!checkMode); };
+    root.getElementById('check').onclick = () => { flushPending(); setCheckMode(!checkMode); };
     root.getElementById('next').onclick = () => {
-      flushTyping(); // typing in the current step belongs to it, even if focus never left the field
+      flushPending(); // typing and scrolling in the current step belong to it
       setCheckMode(false);
       const call = last ? window.__recFinish() : window.__recNext();
       call.then(s => { state = s; render(); });
     };
   }
 
+  // Recording without Excel: steps are created as the user goes. The user can
+  // name each step; 'Next step' starts a new one, 'Finish' saves the recording.
+  function renderFreeform() {
+    root.innerHTML = `<style>${STYLE}</style><div class="bar">
+      <div class="head" id="toggle"><span class="dot"></span><b>REC · STEP ${state.idx + 1}</b>
+        <span class="count">${state.count} action${state.count === 1 ? '' : 's'}</span><span>${collapsed ? '▴' : '▾'}</span></div>
+      ${collapsed ? '' : `<div class="body">
+        <input class="stepname" id="stepname" placeholder="Name this step (optional)" value="${esc(stepName)}" maxlength="80">
+        <div class="desc">Do this part of the test in the page. Click Next step to start a new step, or Finish recording when the test is done.</div>
+        ${checkMode ? '<div class="note">Click the text on the page that proves this step worked.</div>' : ''}
+        <div class="row">
+          <button class="check ${checkMode ? 'on' : ''}" id="check">${checkMode ? 'Cancel check' : '+ Add check'}</button>
+          <button class="next" id="next">Next step ▶</button>
+        </div>
+        <div class="row"><button class="finish" id="finish">Finish recording ■</button></div></div>`}
+    </div>`;
+    root.getElementById('toggle').onclick = () => { collapsed = !collapsed; render(); };
+    if (collapsed) return;
+    // Saved in Python after a short pause, so the name survives page loads (the toolbar is rebuilt on each page).
+    root.getElementById('stepname').oninput = e => {
+      stepName = e.target.value;
+      clearTimeout(nameTimer);
+      nameTimer = setTimeout(() => window.__recName && window.__recName(stepName), 500);
+    };
+    root.getElementById('check').onclick = () => { flushPending(); setCheckMode(!checkMode); };
+    const advance = finish => () => {
+      flushPending();
+      setCheckMode(false);
+      const name = stepName;
+      (finish ? window.__recFinish(name) : window.__recNext(name)).then(s => {
+        if (!finish && s.idx !== state.idx) stepName = '';
+        state = s;
+        render();
+      });
+    };
+    root.getElementById('next').onclick = advance(false);
+    root.getElementById('finish').onclick = advance(true);
+  }
+
   async function refresh() {
     try { state = await window.__recState(); } catch (e) { state = null; }
+    if (state && state.freeform && !stepName) stepName = state.custom_name || '';
     render();
   }
   function mount() {

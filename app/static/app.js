@@ -33,6 +33,7 @@ async function loadCases() {
 }
 
 async function selectCase(suite_id, case_id, keepLive = false) {
+  S.newForm = false;
   S.sel = { suite_id, case_id };
   S.detail = await api(`/api/suites/${suite_id}/cases/${encodeURIComponent(case_id)}`);
   S.runForm = false;
@@ -44,6 +45,54 @@ async function selectCase(suite_id, case_id, keepLive = false) {
 async function refresh() {
   await loadCases();
   if (S.sel) await selectCase(S.sel.suite_id, S.sel.case_id, true);
+}
+
+// ------------------------------------------------------------------ record without Excel
+function showNewForm() {
+  if (S.session) return;
+  S.newForm = true;
+  S.sel = null;
+  S.detail = null;
+  S.live = null;
+  renderCaseList();
+  renderMain();
+  $('#nf-title').focus();
+}
+
+async function createFreeform() {
+  const btn = $('#nf-create');
+  btn.disabled = true;
+  try {
+    const res = await api('/api/freeform', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: $('#nf-title').value, url: $('#nf-url').value }),
+    });
+    S.notice = null;
+    S.tab = 'steps';
+    await loadCases();
+    await selectCase(res.suite_id, res.case_id);
+  } catch (err) {
+    $('#nf-error').textContent = err.message;
+    btn.disabled = false;
+  }
+}
+
+function renderNewForm(main, notice) {
+  main.innerHTML = `${notice}<div class="card new-form">
+    <h2>Record a test without Excel</h2>
+    <p class="muted">Give the test a name and the page where it starts. Then record it: the steps, their test data and an
+      Excel test script are created from what you do. You can run it automatically as often as you want.</p>
+    <label for="nf-title">Test name</label>
+    <input id="nf-title" placeholder="e.g. Update worker phone number" maxlength="120">
+    <label for="nf-url">Start URL</label>
+    <input id="nf-url" placeholder="Leave empty for the Acme Mail demo, or paste https://…">
+    <div class="hint">For a site that needs a sign-in (e.g. Outlook or Fusion), you can sign in once before you record.</div>
+    <div class="err-text" id="nf-error"></div>
+    <div class="foot"><button class="btn" id="nf-cancel">Cancel</button><button class="btn primary" id="nf-create">Create test</button></div>
+  </div>`;
+  $('#nf-cancel').onclick = () => { S.newForm = false; renderMain(); };
+  $('#nf-create').onclick = createFreeform;
+  main.querySelectorAll('input').forEach(i => i.addEventListener('keydown', e => { if (e.key === 'Enter') createFreeform(); }));
 }
 
 // ------------------------------------------------------------------ upload
@@ -185,7 +234,12 @@ function applyEvent(L, ev) {
       acts.push({ type: ev.action.type, target: ev.action.target, message: ev.message });
       break;
     }
-    case 'step_change': L.idx = ev.idx; break;
+    case 'step_change':
+      // Recording without Excel creates steps as it goes.
+      if (!L.steps[ev.idx]) L.steps.push({ step_id: ev.step_id, name: ev.name, actions: [] });
+      L.idx = ev.idx;
+      break;
+    case 'step_named': if (L.steps[ev.idx]) L.steps[ev.idx].name = ev.name; break;
     case 'recording_saved': L.summary = ev; break;
     case 'run_start':
       L.run_id = ev.run_id;
@@ -222,6 +276,7 @@ function renderCaseList() {
 function renderMain() {
   const main = $('#main');
   const notice = S.notice ? `<div class="notice ${S.notice.kind}">${S.notice.html}</div>` : '';
+  if (S.newForm) { renderNewForm(main, notice); return; }
   if (!S.detail) {
     main.innerHTML = `${notice}<div class="hero">
       <h1>Record once, then automate</h1>
@@ -242,10 +297,15 @@ function renderMain() {
   const stepChip = (num, done, doneText, todoText) =>
     `<span class="st ${done ? 'done' : ''}"><i>${done ? '✓' : num}</i>${done ? doneText : todoText}</span>`;
   const k = needsSignin ? 1 : 0;
+  const freeform = !!c.freeform;
+  const firstChip = freeform
+    ? `<span class="st done"><i>✓</i>Test created${c.steps.length ? ` (${c.steps.length} steps)` : ''}</span>`
+    : `<span class="st done"><i>✓</i>Excel uploaded (${c.steps.length} steps)</span>`;
   main.innerHTML = `${notice}
     <div class="case-head">
       <div>
-        <div class="eyebrow">${esc(suite.filename)} · uploaded ${esc(fmtDate(suite.uploaded_at))}</div>
+        <div class="eyebrow">${freeform ? `Recorded without Excel · created ${esc(fmtDate(suite.uploaded_at))}`
+          : `${esc(suite.filename)} · uploaded ${esc(fmtDate(suite.uploaded_at))}`}</div>
         <h1>${esc(c.id)} · ${esc(c.title)}</h1>
         ${c.description ? `<p>${esc(c.description)}</p>` : ''}
         <div class="target">Application under test: <code>${esc(target.url)}</code>
@@ -258,7 +318,7 @@ function renderMain() {
       </div>
     </div>
     <div class="flow">
-      <span class="st done"><i>✓</i>Excel uploaded (${c.steps.length} steps)</span><span class="arrow">→</span>
+      ${firstChip}<span class="arrow">→</span>
       ${needsSignin ? `${stepChip(2, signedIn, 'Signed in to the application', 'Sign in once')}<span class="arrow">→</span>` : ''}
       ${stepChip(2 + k, recorded, `Recorded ${esc(fmtDate(recording && recording.recorded_at))}`, 'Record the steps once')}<span class="arrow">→</span>
       ${stepChip(3 + k, runs.length, `${runs.length} automated run(s)`, 'Run automatically')}
@@ -266,7 +326,7 @@ function renderMain() {
     <div id="run-form-slot"></div>
     <div id="live"></div>
     <div class="tabs">
-      <button data-tab="steps" class="${S.tab === 'steps' ? 'on' : ''}">Excel steps <span class="count">${c.steps.length}</span></button>
+      <button data-tab="steps" class="${S.tab === 'steps' ? 'on' : ''}">${freeform ? 'Steps' : 'Excel steps'} <span class="count">${c.steps.length}</span></button>
       <button data-tab="recording" class="${S.tab === 'recording' ? 'on' : ''}">Recorded automation ${recorded ? `<span class="count">${countActions(recording)}</span>` : ''}</button>
       <button data-tab="runs" class="${S.tab === 'runs' ? 'on' : ''}">Run history <span class="count">${runs.length}</span></button>
     </div>
@@ -291,8 +351,15 @@ function renderTab() {
   const body = $('#tab-body');
   const { case: c, recording, runs } = S.detail;
   if (S.tab === 'steps') {
+    if (!c.steps.length) {
+      body.innerHTML = `<div class="card empty-box">No steps yet. Click <b>Record steps</b> and do the test once.
+        The steps are created while you record: use <b>Next step</b> on the toolbar to start each new step.</div>`;
+      return;
+    }
     const last = runs[0] ? Object.fromEntries((runs[0].steps || []).map(s => [s.step_id, s.status])) : {};
-    body.innerHTML = `<div class="card"><table class="grid">
+    const script = `<div class="script-link"><a href="/api/suites/${esc(S.detail.suite.id)}/workbook">⭳ Download ${c.freeform ? 'as an Excel test script' : 'the test script (.xlsx)'}</a>
+      ${c.freeform ? '<span class="faint">· typed values are test data you can change in the run form</span>' : ''}</div>`;
+    body.innerHTML = `${script}<div class="card"><table class="grid">
       <thead><tr><th>Step</th><th>Process step</th><th>Description</th><th>Test data</th><th>Expected result</th><th>Last run</th></tr></thead>
       <tbody>${c.steps.map(s => `<tr>
         <td class="sid">${esc(s.step_id)}</td>
@@ -312,7 +379,9 @@ function renderTab() {
       : '';
     body.innerHTML = `<div class="card">${warn}
       <div class="rec-step faint">Recorded ${esc(fmtDate(recording.recorded_at))} · ${countActions(recording)} actions ·
-        ${recording.linked_parameters} value(s) linked to Excel test data <span class="param">\${…}</span>, so changing the Excel data changes what the automation types.</div>
+        ${c.freeform
+          ? `${recording.linked_parameters} typed value(s) saved as test data <span class="param">\${…}</span>, so you can change them in the run form.`
+          : `${recording.linked_parameters} value(s) linked to Excel test data <span class="param">\${…}</span>, so changing the Excel data changes what the automation types.`}</div>
       ${recording.steps.map(s => `<div class="rec-step">
         <h3>${esc(s.step_id)} <span class="muted" style="font-weight:500">${esc(s.name)}</span></h3>
         ${s.actions.length ? s.actions.map(renderAction).join('') : '<div class="faint">No actions recorded for this step.</div>'}
@@ -356,6 +425,7 @@ function describeAction(a) {
     case 'press': return `Press ${esc(a.key)} in ${esc(a.target)}`;
     case 'select': return `Select “${withParams(val)}” in ${esc(a.target)}`;
     case 'expect_text': return `Check that “${withParams(a.text)}” is visible`;
+    case 'scroll': return `Scroll ${a.page ? 'the page' : esc(a.target)} to ${a.y || 0} px${a.x ? ` (across ${a.x} px)` : ''} <span class="chip">best effort</span>`;
     default: return esc(a.type);
   }
 }
@@ -363,7 +433,7 @@ function describeAction(a) {
 function renderAction(a) {
   const loc = a.locators && a.locators[0];
   const locText = loc ? (loc.kind === 'role' ? `role=${loc.role} name="${loc.value}"` : `${loc.kind}="${loc.value}"`) : '';
-  const labels = { goto: 'open', click: 'click', fill: 'type', press: 'key', select: 'select', expect_text: 'check' };
+  const labels = { goto: 'open', click: 'click', fill: 'type', press: 'key', select: 'select', expect_text: 'check', scroll: 'scroll' };
   return `<div class="act"><span class="type ${a.type}">${labels[a.type] || a.type}</span>
     <div>${describeAction(a)}${a.navigates ? '<span class="chip">loads page</span>' : ''}
     ${locText ? `<div class="loc">${esc(locText)}${a.locators.length > 1 ? ` <span title="Fallback locators used if the first one is not found">+${a.locators.length - 1} fallback</span>` : ''}</div>` : ''}</div></div>`;
@@ -414,8 +484,11 @@ function renderLive() {
     : isSignin ? (L.done ? 'Sign-in finished' : 'Sign-in in progress')
     : (L.done ? 'Recording finished' : 'Recording in progress');
   const where = S.config.live_view_url ? 'in the live browser view above' : 'in the browser window that opened';
+  const freeform = !!(S.detail && S.detail.case.freeform);
   const hint = isSignin
     ? `Sign in to the application ${where}, including any MFA prompt. Then click <b>Save sign-in</b> on its toolbar. Your password is not recorded or stored by the studio.`
+    : freeform
+    ? `Do the test ${where}. On the toolbar in the bottom-right corner, you can name each step. Use <b>+ Add check</b> to mark text that proves a step worked, <b>Next step</b> to start a new step, and <b>Finish recording</b> when you are done.`
     : `Do each Excel step ${where}. The toolbar in the bottom-right corner shows the current step: use <b>+ Add check</b> to mark text that proves the step worked, then <b>Next step</b>.`;
 
   box.innerHTML = `<div class="card live ${isSignin ? 'record' : L.kind}">
@@ -503,6 +576,7 @@ function openLightbox(src) {
 // ------------------------------------------------------------------ boot
 (async function init() {
   setupUpload();
+  $('#btn-new-rec').onclick = showNewForm;
   S.config = await api('/api/config').catch(() => S.config);
   await loadCases();
   const { active } = await api('/api/status');

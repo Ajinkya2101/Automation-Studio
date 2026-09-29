@@ -36,6 +36,11 @@ def start_url(case_steps: list[dict], default: str) -> str:
     return default
 
 
+def case_target(case: dict, default: str) -> str:
+    """Start URL of a test: given directly (recorded without Excel) or by the Excel URL data."""
+    return case.get("start_url") or start_url(case["steps"], default)
+
+
 def substitute(value: str, data: dict[str, str]) -> str:
     def repl(m):
         key = m.group(1)
@@ -114,6 +119,9 @@ def describe(a: dict, data: dict | None = None) -> str:
         return f"Select \"{_shown(a.get('value'), a, data)}\" in {target}"
     if t == "expect_text":
         return f"Check that \"{_shown(a.get('text'), a, data)}\" is visible"
+    if t == "scroll":
+        where = "the page" if a.get("page") else target
+        return f"Scroll {where} to {a.get('y', 0)} px" + (f" (across {a['x']} px)" if a.get("x") else "")
     return t
 
 
