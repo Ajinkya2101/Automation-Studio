@@ -189,6 +189,7 @@ def _resolve(page: Page, candidates: list[dict], target: str, timeout_ms: int = 
             if n == 1:
                 return loc, i
             if n > 1 and fallback is None:
+                c["matches"] = n
                 fallback = (loc.first, i)
         if fallback:
             return fallback
@@ -271,6 +272,22 @@ def _perform(page: Page, a: dict, data: dict) -> tuple[str, int]:
     candidates = _candidates(a["locators"])
     loc, idx = _resolve(page, candidates, a.get("target", "element"))
     used = locator_label(candidates[idx]) + (" (under aria-hidden)" if candidates[idx].get("include_hidden") else "")
+    try:
+        _act(page, a, data, loc)
+    except Exception as exc:
+        # A CSS path that fits several elements is a guess: the first one may be the wrong control.
+        n = candidates[idx].get("matches")
+        if n and candidates[idx]["kind"] == "css":
+            raise StepFailed(
+                f"{_short(exc)} The recording identifies {a.get('target', 'this element')} only by its position "
+                f"in the page ({used}), which fits {n} elements here, so the wrong one was probably tried. "
+                "Re-record this step so the control is saved by its name.") from exc
+        raise
+    return used, idx
+
+
+def _act(page: Page, a: dict, data: dict, loc) -> None:
+    t = a["type"]
     if t in ("click", "press") and a.get("navigates"):
         with page.expect_navigation(wait_until="domcontentloaded", timeout=ACTION_TIMEOUT_MS):
             loc.click() if t == "click" else loc.press(a["key"])
@@ -283,7 +300,6 @@ def _perform(page: Page, a: dict, data: dict) -> tuple[str, int]:
         loc.fill(substitute(a.get("value", ""), data))
     elif t == "select":
         loc.select_option(substitute(a.get("value", ""), data))
-    return used, idx
 
 
 def _page_errors(page: Page) -> str:

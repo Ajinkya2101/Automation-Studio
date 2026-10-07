@@ -43,7 +43,16 @@
     }
     return null;
   }
-  const nameOf = el => clean(el.getAttribute('aria-label') || el.innerText || el.value || el.getAttribute('title'));
+  // Icon-only controls (Oracle Fusion toolbar buttons such as Add Row) have no text:
+  // their name is the icon image's alt text or a tooltip.
+  function iconNameOf(el) {
+    const img = el.querySelector('img[alt]:not([alt=""]), img[title]:not([title=""])');
+    if (img) return clean(img.getAttribute('alt') || img.getAttribute('title'));
+    const svgTitle = el.querySelector('svg title');
+    return svgTitle ? clean(svgTitle.textContent) : '';
+  }
+  const nameOf = el => clean(el.getAttribute('aria-label') || el.innerText || el.value) ||
+    iconNameOf(el) || clean(el.getAttribute('title'));
   function labelOf(el) {
     if (el.labels && el.labels.length) return clean(el.labels[0].innerText);
     const by = el.getAttribute('aria-labelledby');
@@ -53,7 +62,12 @@
   function cssPath(el) {
     if (stableId(el.id)) return '#' + cssEsc(el.id);
     const parts = [];
-    while (el && el.nodeType === 1 && parts.length < 5) {
+    // Five levels are usually enough; a path that still matches other elements
+    // (e.g. the same icon in every table toolbar) keeps climbing until it is unique.
+    const ambiguous = () => {
+      try { return document.querySelectorAll(parts.join(' > ')).length > 1; } catch (e) { return false; }
+    };
+    while (el && el.nodeType === 1 && (parts.length < 5 || (parts.length < 15 && ambiguous()))) {
       if (stableId(el.id)) { parts.unshift('#' + cssEsc(el.id)); break; }
       let sel = el.tagName.toLowerCase();
       const name = el.getAttribute('name');
@@ -86,6 +100,14 @@
     }
     const aria = clean(el.getAttribute('aria-label'));
     if (aria) out.push({ kind: 'css', value: `${el.tagName.toLowerCase()}[aria-label="${cssAttr(aria)}"]` });
+    const tag = el.tagName.toLowerCase();
+    const title = clean(el.getAttribute('title'));
+    if (title) out.push({ kind: 'css', value: `${tag}[title="${cssAttr(title)}"]` });
+    const icon = el.querySelector('img[alt]:not([alt=""]), img[title]:not([title=""])');
+    if (icon) {
+      const attr = icon.getAttribute('alt') ? 'alt' : 'title';
+      out.push({ kind: 'css', value: `${tag}:has(img[${attr}="${cssAttr(icon.getAttribute(attr))}"])` });
+    }
     out.push({ kind: 'css', value: cssPath(el) });
     return out;
   }
