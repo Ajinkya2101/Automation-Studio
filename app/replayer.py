@@ -14,7 +14,7 @@ from . import storage
 from .actions import (MissingDataError, describe, locator_label, resolve_tokens, resolved_steps,
                       substitute)
 from .browser import first_page, open_context
-from .config import ACTION_TIMEOUT_MS, APP_URL
+from .config import ACTION_TIMEOUT_MS, APP_URL, SLOW_FACTOR
 from .events import Session
 from .excel_io import write_results
 from . import mockmail
@@ -31,22 +31,31 @@ class Stopped(Exception):
 ICON_GLYPHS = re.compile("[-]")  # icon-font characters (private use area)
 GENERATED_ID = re.compile(r"#[^\s>]*\d")        # ids like #splitButton-r44 or #\35 88 change every load
 STRUCTURAL_GRACE_S = 5  # how long semantic locators get before CSS fallbacks are allowed
-SETTLE_MAX_S = 15        # longest wait for the app to finish reacting to an action
+SETTLE_MAX_S = 30 * SLOW_FACTOR      # longest wait for the app to finish reacting to an action
+RECOVER_AFTER_S = 12 * SLOW_FACTOR   # target still missing this long with the app idle: the last action was lost
 NET_QUIET_S = 0.5        # no app requests in flight for this long = network settled
 DOM_QUIET_MS = 400       # no DOM changes for this long = screen settled
 
-# Resolves true once the page looks idle: no DOM changes for `quiet` ms, and the
-# app's own busy flags (Oracle ADF / Oracle JET, when present) report ready.
+# True while the app's own busy flags say it is still working: Oracle ADF (classic
+# Fusion pages) and Oracle JET / Visual Builder (Redwood pages, which load JET
+# through RequireJS instead of a global `oj`).
+BUSY_JS = """() => {
+  try { if (window.AdfPage && AdfPage.PAGE && !AdfPage.PAGE.isSynchronizedWithServer()) return true; } catch (e) {}
+  try { if (window.oj && oj.Context && !oj.Context.getPageContext().getBusyContext().isReady()) return true; } catch (e) {}
+  try {
+    if (window.require && require.defined && require.defined('ojs/ojcontext')
+        && !require('ojs/ojcontext').getPageContext().getBusyContext().isReady()) return true;
+  } catch (e) {}
+  return document.readyState !== 'complete';
+}"""
+
+# Resolves once the page looks idle: no DOM changes for `quiet` ms and no busy flags.
 SETTLE_JS = """([quiet, max]) => new Promise(resolve => {
   const start = Date.now();
   let last = Date.now();
   const obs = new MutationObserver(() => { last = Date.now(); });
   obs.observe(document, {subtree: true, childList: true, attributes: true, characterData: true});
-  const busy = () => {
-    try { if (window.AdfPage && AdfPage.PAGE && !AdfPage.PAGE.isSynchronizedWithServer()) return true; } catch (e) {}
-    try { if (window.oj && oj.Context && !oj.Context.getPageContext().getBusyContext().isReady()) return true; } catch (e) {}
-    return document.readyState !== 'complete';
-  };
+  const busy = """ + BUSY_JS + """;
   (function tick() {
     const now = Date.now();
     if ((now - last >= quiet && !busy()) || now - start >= max) { obs.disconnect(); resolve(); return; }
@@ -65,7 +74,7 @@ class _Network:
     TRACKED = {"document", "xhr", "fetch", "script"}
 
     def __init__(self, ctx):
-        self.inflight = set()
+        self.inflight = {}  # request -> when it started
         self.last = time.time()
         ctx.on("request", self._start)
         ctx.on("requestfinished", self._end)
@@ -73,13 +82,27 @@ class _Network:
 
     def _start(self, req):
         if req.resource_type in self.TRACKED:
-            self.inflight.add(req)
+            self.inflight[req] = time.time()
             self.last = time.time()
 
     def _end(self, req):
-        if req in self.inflight:
-            self.inflight.discard(req)
+        if self.inflight.pop(req, None) is not None:
             self.last = time.time()
+
+    def busy(self) -> bool:
+        """A request is still being answered (long-polling ones older than SETTLE_MAX_S don't count)."""
+        now = time.time()
+        return any(now - t < SETTLE_MAX_S for t in list(self.inflight.values())) or now - self.last < NET_QUIET_S
+
+
+def _idle(page: Page, net: "_Network | None") -> bool:
+    """The app is not working on anything: no requests in flight and no busy flags."""
+    if net and net.busy():
+        return False
+    try:
+        return not page.evaluate(BUSY_JS)
+    except Exception:  # mid-navigation
+        return False
 
 
 def _settle(page: Page, net: "_Network | None") -> None:
@@ -217,7 +240,7 @@ def _scroll(page: Page, a: dict) -> str:
     try:
         # Scroll areas rarely have a label or short text, so their CSS path is allowed at once.
         loc, i = _resolve(page, _candidates(a.get("locators", [])), a.get("target", "area"),
-                          timeout_ms=6000, css_grace_s=0)
+                          timeout_ms=int(6000 * SLOW_FACTOR), css_grace_s=0)
     except StepFailed:
         return "skipped: scrolled area not found"
     loc.evaluate("(el, [x, y]) => { el.scrollLeft = x; el.scrollTop = y; }", [x, y])
@@ -225,14 +248,120 @@ def _scroll(page: Page, a: dict) -> str:
     return locator_label(_candidates(a.get("locators", []))[i])
 
 
-def _execute(page: Page, a: dict, data: dict, net: "_Network | None" = None) -> tuple[str, int]:
+def _repeatable(a: dict | None) -> bool:
+    """Actions that are safe to do a second time: typing (it replaces the text), Enter in a
+    field that stays on the page (runs a search or picks a list value), and scrolling."""
+    if not a:
+        return False
+    return a["type"] in ("fill", "scroll") or (a["type"] == "press" and a.get("key") == "Enter"
+                                               and not a.get("navigates"))
+
+
+def _redo(page: Page, a: dict, data: dict) -> None:
+    """Repeat an action that had no effect. Typing is repeated key by key, because
+    search-as-you-type fields react to keystrokes, not to a pasted value."""
+    if a["type"] == "scroll":
+        _scroll(page, a)
+        return
+    loc, _ = _resolve(page, _candidates(a["locators"]), a.get("target", "field"), timeout_ms=5000, css_grace_s=0)
+    if a["type"] == "fill":
+        loc.fill("")
+        loc.press_sequentially(substitute(a.get("value", ""), data), delay=40)
+    else:
+        loc.press(a["key"])
+
+
+def _ready(page: Page, candidates: list[dict], target: str, until: float):
+    """Find the target, then wait until it is enabled: on a slow instance a button often
+    appears before the data it depends on has loaded."""
+    loc, idx = _resolve(page, candidates, target, timeout_ms=max(int((until - time.time()) * 1000), 0))
+    while True:
+        try:
+            if loc.is_enabled(timeout=1000):
+                return loc, idx
+        except Exception:  # re-rendered while checking: find it again
+            loc, idx = _resolve(page, candidates, target, timeout_ms=max(int((until - time.time()) * 1000), 0))
+            continue
+        if time.time() >= until:
+            raise StepFailed(
+                f"Found {target}, but it stayed disabled. Usually an earlier action did not take effect (see the "
+                "screenshot), or the recording is missing the step that enables it, such as selecting a row.")
+        page.wait_for_timeout(250)
+
+
+def _find(page: Page, a: dict, data: dict, net: "_Network | None", prev: dict | None, note) -> tuple:
+    """Wait for the action's target, recovering once from a lost previous action.
+
+    On a slow instance an action can do nothing: Enter pressed before the search
+    box was wired up, or text typed while the screen was still being built. When
+    the target is still missing (or disabled) after RECOVER_AFTER_S and the app
+    is idle, so it is not still working on the previous action, that action is
+    repeated once if it is safe to repeat. Clicks are never repeated.
+    """
+    candidates = _candidates(a["locators"])
+    target = a.get("target", "element")
+    start = time.time()
+    deadline = start + ACTION_TIMEOUT_MS / 1000
+    recover_at = start + RECOVER_AFTER_S if _repeatable(prev) else None
+    while True:
+        try:
+            loc, idx = _ready(page, candidates, target, min(deadline, recover_at) if recover_at else deadline)
+            return candidates, loc, idx
+        except StepFailed:
+            if not recover_at or time.time() >= deadline:
+                raise
+        if not _idle(page, net):
+            recover_at = time.time() + 2  # still working on it: keep waiting
+            continue
+        note(f"{target} has not appeared after {time.time() - start:.0f}s and the application is idle, so the "
+             f"previous action probably had no effect. Repeating it: {describe(prev, data)}")
+        try:
+            _redo(page, prev, data)
+            _settle(page, net)
+        except Exception:
+            pass  # its field is gone too; keep waiting for the target anyway
+        recover_at = None
+
+
+def _execute(page: Page, a: dict, data: dict, net: "_Network | None" = None, prev: dict | None = None,
+             note=lambda msg: None, nxt: dict | None = None) -> tuple[str, int]:
     """Run one action and wait for the app to settle. Returns (locator used, candidate index)."""
-    result = _perform(page, a, data)
+    result = _perform(page, a, data, net, prev, note)
     if a["type"] not in ("expect_text", "scroll"):
         _settle(page, net)
     if a["type"] == "fill":
         _check_fill(page, a, data, net)
+        _commit(page, a, net, nxt)
     return result
+
+
+# Leaves the field with Tab's effect on the value (blur + change) on classic Fusion pages only.
+COMMIT_JS = """el => {
+  if (!window.AdfPage || document.activeElement !== el || !['INPUT', 'TEXTAREA'].includes(el.tagName)) return false;
+  el.blur();
+  return true;
+}"""
+
+
+def _commit(page: Page, a: dict, net: "_Network | None", nxt: dict | None) -> None:
+    """Hand a typed value to the application before the next action (best effort, never fails).
+
+    Classic Fusion (ADF) pages check a field with the server only when focus
+    leaves it, then redraw what depends on it: the rest of the table row, the
+    values other lists offer. If the next click is what takes focus away, that
+    check runs while the click is being handled, so a dropdown opened by the
+    click is empty or closed again by the redraw. Leaving the field first and
+    waiting keeps the two apart. Not done when the next action continues in
+    the same field (Enter to search, more typing).
+    """
+    if not nxt or (nxt["type"] in ("press", "fill") and nxt.get("target") == a.get("target")):
+        return
+    try:
+        loc, _ = _resolve(page, _candidates(a["locators"]), a.get("target", "field"), timeout_ms=5000, css_grace_s=0)
+        if loc.evaluate(COMMIT_JS, timeout=2000):
+            _settle(page, net)
+    except Exception:
+        pass
 
 
 def _check_fill(page: Page, a: dict, data: dict, net: "_Network | None") -> None:
@@ -254,7 +383,8 @@ def _check_fill(page: Page, a: dict, data: dict, net: "_Network | None") -> None
     _settle(page, net)
 
 
-def _perform(page: Page, a: dict, data: dict) -> tuple[str, int]:
+def _perform(page: Page, a: dict, data: dict, net: "_Network | None" = None, prev: dict | None = None,
+             note=lambda msg: None) -> tuple[str, int]:
     t = a["type"]
     if t == "goto":
         page.goto(substitute(a["url"], data))
@@ -269,9 +399,8 @@ def _perform(page: Page, a: dict, data: dict) -> tuple[str, int]:
     if t == "scroll":
         return _scroll(page, a), 0
 
-    candidates = _candidates(a["locators"])
-    loc, idx = _resolve(page, candidates, a.get("target", "element"))
-    used = locator_label(candidates[idx]) + (" (under aria-hidden)" if candidates[idx].get("include_hidden") else "")
+    candidates, loc, idx = _find(page, a, data, net, prev, note)
+    used =locator_label(candidates[idx]) + (" (under aria-hidden)" if candidates[idx].get("include_hidden") else "")
     try:
         _act(page, a, data, loc)
     except Exception as exc:
@@ -349,6 +478,8 @@ def run_session(session: Session, suite: dict, case: dict, recording: dict,
     log.emit("info", "Test data: " + "; ".join(f"{k} = {v}" for k, v in shown_data.items()))
 
     failed = stopped = False
+    prev = None  # the action before the current one, which may need repeating if it had no effect
+    following = iter([a for s in recording["steps"] for a in s["actions"]][1:])  # the action after the current one
     with sync_playwright() as p:
         browser = open_context(p, target_url or APP_URL, headless=not headed,
                                slow_mo=slow_mo if headed else 0)
@@ -373,7 +504,10 @@ def run_session(session: Session, suite: dict, case: dict, recording: dict,
                     text = describe(a, test_data)
                     t_act = time.time()
                     try:
-                        used, cand = _execute(page, a, test_data, net)
+                        used, cand = _execute(page, a, test_data, net, prev,
+                                              lambda msg: log.emit("info", msg, step_id=sid, idx=idx, level="warn"),
+                                              next(following, None))
+                        prev = a
                     except (StepFailed, MissingDataError) as exc:
                         raise StepFailed(f"{text}: {exc}") from exc
                     except Stopped:

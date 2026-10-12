@@ -27,5 +27,10 @@ LIVE_VIEW_URL = os.environ.get("STUDIO_LIVE_VIEW_URL", "")
 IN_CONTAINER = bool(os.environ.get("STUDIO_IN_CONTAINER"))
 SCREEN = os.environ.get("STUDIO_SCREEN", "1600x900")
 
+# Slow instances (Oracle Fusion test pods often are): every replay wait limit is
+# multiplied by this. Replay still moves on as soon as the screen is ready, so a
+# higher factor only costs time when a step really fails.
+SLOW_FACTOR = max(float(os.environ.get("STUDIO_SLOW_FACTOR", "1")), 0.1)
+
 # How long replay waits for an element or a check before failing a step.
-ACTION_TIMEOUT_MS = int(os.environ.get("STUDIO_ACTION_TIMEOUT_MS", "20000"))
+ACTION_TIMEOUT_MS = int(int(os.environ.get("STUDIO_ACTION_TIMEOUT_MS", "45000")) * SLOW_FACTOR)
