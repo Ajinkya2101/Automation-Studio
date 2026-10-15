@@ -100,6 +100,8 @@ main { padding: 24px 28px 60px; min-width: 0; max-width: 1280px; }
 .btn.primary:hover { background: #1d4fd8; }
 .btn.rec { background: var(--rec); border-color: var(--rec); color: #fff; }
 .btn.rec:hover { background: #b91c1c; }
+.btn.danger { color: var(--fail); border-color: #f3c9c9; }
+.btn.danger:hover:not(:disabled) { background: var(--fail-soft); }
 .btn.small { padding: 5px 11px; font-size: 13px; }
 .btn .dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
 

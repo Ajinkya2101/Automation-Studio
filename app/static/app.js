@@ -95,6 +95,24 @@ function renderNewForm(main, notice) {
   main.querySelectorAll('input').forEach(i => i.addEventListener('keydown', e => { if (e.key === 'Enter') createFreeform(); }));
 }
 
+// ------------------------------------------------------------------ delete
+async function deleteCase() {
+  const { suite_id, case_id } = S.sel;
+  const runs = S.detail.runs.length;
+  if (!confirm(`Delete ${case_id} · ${S.detail.case.title}?\n\nIts recording${runs ? ` and ${runs} run(s) with their screenshots and results` : ''} will be deleted too. This cannot be undone.`)) return;
+  try {
+    await api(`/api/suites/${suite_id}/cases/${encodeURIComponent(case_id)}`, { method: 'DELETE' });
+  } catch (err) { alert(err.message); return; }
+  S.sel = null;
+  S.detail = null;
+  S.live = null;
+  S.notice = null;
+  S.tab = 'steps';
+  await loadCases();
+  if (S.cases.length) await selectCase(S.cases[0].suite_id, S.cases[0].case_id);
+  else renderMain();
+}
+
 // ------------------------------------------------------------------ upload
 function setupUpload() {
   const dz = $('#dropzone'), input = $('#file-input');
@@ -314,6 +332,7 @@ function renderMain() {
         <button class="btn" id="btn-signin" data-needs-idle ${busy || !hasTarget ? 'disabled' : ''}>${signedIn ? 'Sign in again' : 'Sign in'}</button>
         <button class="btn ${recorded ? '' : 'rec'}" id="btn-record" data-needs-idle ${busy || !hasTarget ? 'disabled' : ''}><span class="dot"></span>${recorded ? 'Re-record' : 'Record steps'}</button>
         <button class="btn primary" id="btn-run" data-needs-idle ${busy || !recorded ? 'disabled' : ''} title="${recorded ? '' : 'Record the steps first'}">▶ Run automated</button>
+        <button class="btn danger" id="btn-delete" data-needs-idle ${busy ? 'disabled' : ''} title="Delete this test case">Delete</button>
       </div>
     </div>
     <div class="flow">
@@ -337,6 +356,7 @@ function renderMain() {
   };
   $('#btn-run').onclick = () => { S.runForm = !S.runForm; renderRunForm(); };
   $('#btn-signin').onclick = startSignin;
+  $('#btn-delete').onclick = deleteCase;
   main.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { S.tab = b.dataset.tab; renderMain(); });
   renderRunForm();
   renderLive();

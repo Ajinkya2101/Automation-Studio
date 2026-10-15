@@ -189,6 +189,16 @@ def case_detail(suite_id: str, case_id: str):
     }
 
 
+@app.delete("/api/suites/{suite_id}/cases/{case_id}")
+def delete_case(suite_id: str, case_id: str):
+    suite, case = _suite_case(suite_id, case_id)
+    s = sessions.active()
+    if s and s.suite_id == suite["id"] and s.case_id == case["id"]:
+        raise HTTPException(409, "This test case is being recorded or run. Stop it before deleting.")
+    storage.delete_case(suite, case["id"])
+    return {"ok": True}
+
+
 @app.post("/api/suites/{suite_id}/cases/{case_id}/signin")
 def start_signin(suite_id: str, case_id: str):
     suite, case = _suite_case(suite_id, case_id)

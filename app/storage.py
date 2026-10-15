@@ -1,6 +1,7 @@
 """File-based storage: uploaded suites, recordings and runs live under data/."""
 import json
 import secrets
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -56,6 +57,20 @@ def list_suites() -> list[dict]:
 
 def find_case(suite: dict, case_id: str) -> dict | None:
     return next((c for c in suite["cases"] if c["id"] == case_id), None)
+
+
+def delete_case(suite: dict, case_id: str) -> None:
+    """Delete a test case with its recording and runs. A suite left without cases is removed whole."""
+    for p in RUNS.glob("*/run.json") if RUNS.exists() else []:
+        r = _read(p)
+        if r and r["suite_id"] == suite["id"] and r["case_id"] == case_id:
+            shutil.rmtree(p.parent, ignore_errors=True)
+    suite["cases"] = [c for c in suite["cases"] if c["id"] != case_id]
+    if not suite["cases"]:
+        shutil.rmtree(suite_dir(suite["id"]), ignore_errors=True)
+        return
+    recording_path(suite["id"], case_id).unlink(missing_ok=True)
+    save_suite(suite)
 
 
 # ---- recordings
