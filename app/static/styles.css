@@ -162,7 +162,7 @@ table.grid { width: 100%; border-collapse: collapse; }
 .act { display: grid; grid-template-columns: 92px 1fr; gap: 10px; padding: 5px 0; align-items: start; }
 .act .type { font-size: 11px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; padding: 2px 8px; border-radius: 6px;
   text-align: center; background: #eef1f5; color: var(--muted); }
-.act .type.click { background: #e8f0fe; color: #1d4ed8; }
+.act .type.click, .act .type.dblclick { background: #e8f0fe; color: #1d4ed8; }
 .act .type.fill { background: #f3e8ff; color: #7e22ce; }
 .act .type.expect_text { background: var(--pass-soft); color: var(--pass); }
 .act .type.goto { background: #e0f2fe; color: #0369a1; }

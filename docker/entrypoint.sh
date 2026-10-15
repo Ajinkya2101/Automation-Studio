@@ -12,7 +12,7 @@ for _ in $(seq 1 50); do [ -e /tmp/.X11-unix/X99 ] && break; sleep 0.1; done
 x11vnc -display :99 -rfbport 5900 -localhost -forever -shared -nopw -quiet -noxdamage >/tmp/x11vnc.log 2>&1 &
 websockify --web /usr/share/novnc 6080 localhost:5900 >/tmp/novnc.log 2>&1 &
 
-if [ ! -f samples/Automation_Email.xlsx ] || [ ! -f samples/Outlook_Email.xlsx ]; then
+if [ ! -f samples/Outlook_Email.xlsx ]; then
   python samples/make_sample.py
 fi
 

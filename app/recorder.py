@@ -17,10 +17,9 @@ from typing import Callable
 from playwright.sync_api import Page, sync_playwright
 
 from . import storage
-from .actions import case_target, describe, parameterize, resolved_steps
+from .actions import NO_START_URL, case_target, describe, parameterize, resolved_steps
 from .browser import first_page, mark_signed_in, open_context
 from .excel_io import build_workbook
-from .config import TARGET_START_URL
 from .events import Session
 
 RECORDER_JS = (Path(__file__).parent / "recorder.js").read_text(encoding="utf-8")
@@ -57,9 +56,12 @@ def record_session(session: Session, suite: dict, case: dict, start_url: str | N
     freeform = bool(case.get("freeform"))
     # {now}-style tokens get this session's values
     steps = [_blank_step(case["id"], 1)] if freeform else resolved_steps(case["steps"])
-    start_url = start_url or case_target(case, TARGET_START_URL)
+    start_url = start_url or case_target(case)
+    if not start_url:
+        raise ValueError(NO_START_URL)
     rec_steps = [{"step_id": s["step_id"], "name": s["name"], "actions": []} for s in steps]
     st = {"idx": 0, "finished": False}
+    tabs: list[Page] = []  # the browser's tabs in the order they opened; the first is tab 0
 
     def snapshot() -> dict:
         s = steps[st["idx"]]
@@ -79,21 +81,14 @@ def record_session(session: Session, suite: dict, case: dict, start_url: str | N
     def add(action: dict) -> None:
         action = {k: v for k, v in action.items() if v not in (None, "")}
         action["recorded_at"] = time.time()
-        cur = rec_steps[st["idx"]]["actions"]
-        # Typing into the same field, or scrolling the same area, twice in a row keeps only the final one.
-        if (action["type"] in ("fill", "scroll") and cur and cur[-1]["type"] == action["type"]
-                and cur[-1].get("locators", [])[:1] == action.get("locators", [])[:1]
-                and cur[-1].get("page") == action.get("page")):
-            cur[-1] = action
-        else:
-            cur.append(action)
+        append_action(rec_steps[st["idx"]]["actions"], action)
         step = rec_steps[st["idx"]]
         log.emit("recorded", describe(action), step_id=step["step_id"], idx=st["idx"],
                  action=_public(action))
 
-    def on_action(_source, action):
+    def on_action(source, action):
         if not st["finished"]:
-            add(action)
+            add({**action, **_where(source, tabs)})
         return snapshot()
 
     def on_next(_source, name=None):
@@ -119,7 +114,7 @@ def record_session(session: Session, suite: dict, case: dict, start_url: str | N
         if frame.parent_frame is not None:
             return
         cur = rec_steps[st["idx"]]["actions"] or (rec_steps[st["idx"] - 1]["actions"] if st["idx"] else [])
-        if cur and cur[-1]["type"] in ("click", "press") and time.time() - cur[-1]["recorded_at"] < 5:
+        if cur and cur[-1]["type"] in ("click", "dblclick", "press") and time.time() - cur[-1]["recorded_at"] < 5:
             cur[-1]["navigates"] = True
 
     log.emit("recording_started", f"Recording {case['id']} on {start_url}. Perform each step in the "
@@ -134,9 +129,14 @@ def record_session(session: Session, suite: dict, case: dict, start_url: str | N
         ctx.expose_binding("__recFinish", on_finish)
         ctx.expose_binding("__recName", lambda _s, name: (name_current(name), snapshot())[1])
         ctx.add_init_script(RECORDER_JS)
-        ctx.on("page", lambda pg: pg.on("framenavigated", on_navigated))
+        def on_page(pg: Page) -> None:
+            if pg not in tabs:
+                tabs.append(pg)
+                pg.on("framenavigated", on_navigated)
+
         page = first_page(ctx)
-        page.on("framenavigated", on_navigated)  # harmless if the context hook fired too
+        on_page(page)
+        ctx.on("page", on_page)
         add({"type": "goto", "url": start_url, "target": start_url, "locators": []})
         page.goto(start_url)
         if on_ready:
@@ -150,6 +150,9 @@ def record_session(session: Session, suite: dict, case: dict, start_url: str | N
             pass
 
     status = "completed" if st["finished"] else "stopped"
+    for s in rec_steps:
+        for a in s["actions"]:
+            a.pop("el", None)  # only meant something while the page was open
     if freeform:
         steps, rec_steps = _build_freeform_case(suite, case, steps, rec_steps)
     linked = parameterize(rec_steps, steps)
@@ -170,6 +173,38 @@ def record_session(session: Session, suite: dict, case: dict, start_url: str | N
              f"Recording saved: {total} actions across {len(rec_steps)} steps, {linked} {what}.",
              level="success", total=total, linked=linked, status=status)
     return status
+
+
+def append_action(cur: list[dict], action: dict) -> None:
+    """Add an action to a step, merging what the page reports in several parts."""
+    def same_place(b: dict) -> bool:
+        return all(b.get(k) == action.get(k) for k in ("el", "page", "tab", "frame"))
+
+    # Typing into the same field, or scrolling the same area, twice in a row keeps only the final one.
+    # 'Same' means the same element: two fields can share a label (Quantity in every table row).
+    if action["type"] in ("fill", "scroll") and cur and cur[-1]["type"] == action["type"] and same_place(cur[-1]):
+        cur[-1] = action
+        return
+    if action["type"] == "dblclick":
+        # The browser reports a double-click after the two clicks it is made of.
+        for _ in range(2):
+            if cur and cur[-1]["type"] == "click" and same_place(cur[-1]):
+                cur.pop()
+    cur.append(action)
+
+
+def _where(source, tabs: list) -> dict:
+    """Which tab and which iframe an action happened in (nothing for the main page of the first tab)."""
+    out = {}
+    page, frame = source.get("page"), source.get("frame")
+    if page in tabs and tabs.index(page):
+        out["tab"] = tabs.index(page)
+    if frame is not None and frame.parent_frame is not None:
+        inner = [f for f in frame.page.frames if f.parent_frame is not None]
+        # Replay finds the frame again by its name, else its address, else its position.
+        out["frame"] = {"name": frame.name, "url": frame.url.split("?")[0].split("#")[0],
+                        "index": inner.index(frame) if frame in inner else 0}
+    return out
 
 
 def _field_key(action: dict) -> str:
@@ -218,7 +253,9 @@ def _build_freeform_case(suite: dict, case: dict, steps: list[dict], rec_steps: 
 def signin_session(session: Session, suite: dict, case: dict, headless: bool = False) -> str:
     """Open the test's site so the user can sign in; the profile keeps the session."""
     log = session.log
-    url = case_target(case, TARGET_START_URL)
+    url = case_target(case)
+    if not url:
+        raise ValueError(NO_START_URL)
     st = {"finished": False}
 
     def snapshot(_source=None):
@@ -292,7 +329,7 @@ def _review(rec_steps: list[dict], steps: list[dict], linked: int, freeform: boo
                      "suggestion list shows.")
     if total_checks(rec_steps) == 0:
         notes.append("No checks were added, so a run can only show that the clicks happened, not that the "
-                     "result appeared (e.g. the email in Sent Items). Use '+ Add check'.")
+                     "result appeared. Use '+ Add check' on text that proves a step worked.")
     return notes
 
 

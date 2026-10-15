@@ -20,6 +20,7 @@ os.environ.setdefault("STUDIO_DATA_DIR", tempfile.mkdtemp(prefix="studio-freefor
 import openpyxl  # noqa: E402
 import uvicorn  # noqa: E402
 
+import demo_site  # noqa: E402
 from app import storage  # noqa: E402
 from app.events import sessions  # noqa: E402
 from app.excel_io import parse_workbook  # noqa: E402
@@ -28,7 +29,8 @@ from app.recorder import record_session  # noqa: E402
 
 PORT = 8768
 BASE = f"http://127.0.0.1:{PORT}"
-SUBJECT = "Q3 inventory adjustment summary"
+NAME = "Northwind Traders"
+app.include_router(demo_site.router)
 
 
 def http(method, path, payload=None):
@@ -72,28 +74,28 @@ def act_like_a_user(page):
     type_into("User Name", "demo.user")
     type_into("Password", "demo123")
     page.get_by_role("button", name="Sign in").click()
-    page.get_by_role("heading", name="Inbox").wait_for()
+    page.get_by_role("heading", name="Suppliers").wait_for()
     page.wait_for_timeout(300)
     seen["name_after_navigation"] = page.locator("#stepname").input_value()
-    add_check(page.get_by_role("heading", name="Inbox"))
+    add_check(page.get_by_role("heading", name="Suppliers"))
     page.locator("#next").click()
     page.wait_for_timeout(300)
     # Step 2: named just before Next.
-    page.get_by_role("link", name="Compose").click()
-    type_into("To", "finance.team@acme.test")
-    type_into("Subject", SUBJECT)
-    type_into("Message", "Hi team, the Q3 inventory adjustments have been posted.")
-    page.get_by_role("button", name="Send").click()
-    add_check(page.get_by_text("Message sent", exact=True))
-    page.locator("#stepname").fill("Write and send the email")
+    page.get_by_role("link", name="Add supplier").click()
+    type_into("Name", NAME)
+    type_into("Phone", "+1 555 0100")
+    type_into("Notes", "Preferred supplier for office furniture.")
+    page.get_by_role("button", name="Save").click()
+    add_check(page.get_by_text("Supplier saved", exact=True))
+    page.locator("#stepname").fill("Add the supplier")
     page.locator("#next").click()
     page.wait_for_timeout(300)
     # An extra Next with no actions must not create an empty step.
     page.locator("#next").click()
     page.wait_for_timeout(300)
     # Step 3: left unnamed.
-    page.get_by_role("link", name="Sent", exact=True).click()
-    add_check(page.locator(".subject", has_text=SUBJECT))
+    page.get_by_role("link", name="Suppliers", exact=True).click()
+    add_check(page.locator(".name", has_text=NAME))
     page.locator("#finish").click()
 
 
@@ -105,12 +107,12 @@ def main():
     while not server.started:
         time.sleep(0.1)
 
-    created = http("POST", "/api/freeform", {"title": "Send a status email", "url": f"{BASE}/mail/login"})
+    created = http("POST", "/api/freeform", {"title": "Add a supplier", "url": f"{BASE}/demo/login"})
     suite_id, case_id = created["suite_id"], created["case_id"]
     detail = http("GET", f"/api/suites/{suite_id}/cases/{case_id}")
     check(case_id.startswith("REC-") and detail["case"]["freeform"] and detail["case"]["steps"] == [],
           f"test created without Excel: {case_id}, no steps yet")
-    check(detail["target"]["url"] == f"{BASE}/mail/login", "start URL comes from the form")
+    check(detail["target"]["url"] == f"{BASE}/demo/login", "start URL comes from the form")
 
     suite = storage.load_suite(suite_id)
     case = storage.find_case(suite, case_id)
@@ -125,16 +127,16 @@ def main():
 
     case = storage.find_case(storage.load_suite(suite_id), case_id)
     steps = case["steps"]
-    check([st["name"] for st in steps] == ["Log in", "Write and send the email", "Step 3"],
+    check([st["name"] for st in steps] == ["Log in", "Add the supplier", "Step 3"],
           f"steps created from the recording: {[st['name'] for st in steps]}")
     check([st["step_id"] for st in steps] == [f"{case_id}.{n}" for n in (1, 2, 3)], "step IDs numbered 1-3")
     check(steps[0]["data"] == {"User Name": "demo.user"}, f"password not stored as test data: {steps[0]['data']}")
-    check(list(steps[1]["data"]) == ["To", "Subject", "Message"], f"typed values became test data: {steps[1]['data']}")
-    check("Message sent" in steps[1]["expected"], f"checks became expected results: {steps[1]['expected']}")
+    check(list(steps[1]["data"]) == ["Name", "Phone", "Notes"], f"typed values became test data: {steps[1]['data']}")
+    check("Supplier saved" in steps[1]["expected"], f"checks became expected results: {steps[1]['expected']}")
 
     rec = storage.load_recording(suite_id, case_id)
     fills = [a["value"] for st in rec["steps"] for a in st["actions"] if a["type"] == "fill" and not a.get("masked")]
-    check(fills == ["${User Name}", "${To}", "${Subject}", "${Message}"], f"recording uses parameters: {fills}")
+    check(fills == ["${User Name}", "${Name}", "${Phone}", "${Notes}"], f"recording uses parameters: {fills}")
     check(not rec.get("warnings"), f"no review warnings: {rec.get('warnings')}")
 
     parsed, warnings = parse_workbook(storage.workbook_path(suite_id))
@@ -142,6 +144,7 @@ def main():
           == [(st["step_id"], st["name"], st["data"]) for st in steps] and not warnings,
           "generated Excel script reads back to the same steps and test data")
 
+    demo_site.reset()  # every run starts from an empty list
     run = http("POST", f"/api/suites/{suite_id}/cases/{case_id}/run", {"headed": False})
     wait_idle()
     run = http("GET", f"/api/runs/{run['run_id']}")
@@ -149,8 +152,9 @@ def main():
     ws = openpyxl.load_workbook(storage.run_dir(run["id"]) / "results.xlsx").active
     check([ws.cell(r, 8).value for r in range(11, 14)] == ["Pass"] * 3, "results written into the generated script")
 
+    demo_site.reset()
     run2 = http("POST", f"/api/suites/{suite_id}/cases/{case_id}/run",
-                {"headed": False, "data": {"Subject": "Changed in the run form {now}"}})
+                {"headed": False, "data": {"Name": "Changed in the run form {now}"}})
     wait_idle()
     run2 = http("GET", f"/api/runs/{run2['run_id']}")
     check(run2["status"] == "passed" and "Changed in the run form 20" in run2["steps"][2]["observed"],

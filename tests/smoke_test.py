@@ -22,14 +22,40 @@ os.environ.setdefault("STUDIO_DATA_DIR", tempfile.mkdtemp(prefix="studio-smoke-"
 import openpyxl  # noqa: E402
 import uvicorn  # noqa: E402
 
+import demo_site  # noqa: E402
 from app import storage  # noqa: E402
-from app.config import SAMPLE_WORKBOOK  # noqa: E402
 from app.events import sessions  # noqa: E402
+from app.excel_io import build_workbook  # noqa: E402
 from app.main import app  # noqa: E402
 from app.recorder import record_session  # noqa: E402
 
 PORT = 8765
 BASE = f"http://127.0.0.1:{PORT}"
+CASE_ID = "TS_SUP001"
+NAME = "Northwind Traders"
+NOTES = "Preferred supplier for office furniture. Payment terms 30 days."
+app.include_router(demo_site.router)
+
+
+def make_workbook() -> Path:
+    """The test script a tester would upload, in the team template."""
+    steps = [
+        ("Sign in", "1. Open the sign-in page\n2. Input User Name & Password\n3. Click Sign in",
+         {"URL": f"{BASE}/demo/login", "User Name": "demo.user", "Password": "demo123"},
+         "User is signed in and the Suppliers list is displayed"),
+        ("Open a new supplier", "1. Click Add supplier", {}, "New supplier form opens"),
+        ("Enter the supplier", "1. Enter the Name\n2. Enter the Phone\n3. Enter the Notes",
+         {"Name": NAME, "Phone": "+1 555 0100", "Notes": NOTES}, "Name, Phone and Notes are populated"),
+        ("Save the supplier", "1. Click Save", {}, "Supplier saved confirmation is displayed"),
+        ("Verify the supplier in the list", "1. Click Suppliers\n2. Confirm the supplier is listed",
+         {"Name": NAME}, "Supplier appears in the list with the correct name"),
+    ]
+    case = {"id": CASE_ID, "sheet": CASE_ID, "title": "Create a supplier", "description": "", "steps": [
+        {"step_id": f"{CASE_ID}.{i}", "name": name, "role": "User", "description": desc, "data": data,
+         "expected": expected} for i, (name, desc, data, expected) in enumerate(steps, start=1)]}
+    path = Path(tempfile.mkdtemp(prefix="studio-smoke-xlsx-")) / "Create_Supplier.xlsx"
+    build_workbook(path, case, "Create a supplier")
+    return path
 
 
 def http(method, path, body=None, headers=None):
@@ -68,37 +94,38 @@ def act_like_a_user(page):
         page.locator("#next").click()
         page.wait_for_timeout(300)
 
-    # Step 1: login
+    # Step 1: sign in
     type_into("User Name", "demo.user")
     type_into("Password", "demo123")
     page.get_by_role("button", name="Sign in").click()
-    add_check(page.get_by_role("heading", name="Inbox"))
+    add_check(page.get_by_role("heading", name="Suppliers"))
     next_step()
-    # Step 2: compose
-    page.get_by_role("link", name="Compose").click()
-    add_check(page.get_by_role("heading", name="New message"))
+    # Step 2: open the form
+    page.get_by_role("link", name="Add supplier").click()
+    add_check(page.get_by_role("heading", name="New supplier"))
     next_step()
-    # Step 3: write
-    type_into("To", "finance.team@acme.test")
-    type_into("Subject", "Q3 inventory adjustment summary")
-    type_into("Message", "Hi team, the Q3 inventory adjustments have been posted. Regards, Demo User")
+    # Step 3: enter
+    type_into("Name", NAME)
+    type_into("Phone", "+1 555 0100")
+    type_into("Notes", NOTES)
     next_step()
-    # Step 4: send
-    page.get_by_role("button", name="Send").click()
-    add_check(page.get_by_text("Message sent", exact=True))
+    # Step 4: save
+    page.get_by_role("button", name="Save").click()
+    add_check(page.get_by_text("Supplier saved", exact=True))
     next_step()
-    # Step 5: verify in Sent
-    page.get_by_role("link", name="Sent", exact=True).click()
-    add_check(page.locator(".subject", has_text="Q3 inventory adjustment summary"))
+    # Step 5: verify in the list
+    page.get_by_role("link", name="Suppliers", exact=True).click()
+    add_check(page.locator(".name", has_text=NAME))
     page.locator("#next").click()  # "Finish recording"
 
 
 def run_case(suite_id, case_id, data=None):
+    demo_site.reset()  # every run starts from an empty list
     info = http("POST", f"/api/suites/{suite_id}/cases/{case_id}/run",
-                json.dumps({"headed": False, "reset_mailbox": True, "data": data or {}}).encode(),
+                json.dumps({"headed": False, "data": data or {}}).encode(),
                 {"Content-Type": "application/json"})
     try:
-        wait_idle(60)
+        wait_idle()  # the failing run alone waits 45s for its check
     except TimeoutError:
         for ev in sessions.get(info["id"]).log.all():
             print("   log:", ev["type"], ev["message"][:400])
@@ -123,14 +150,14 @@ def main():
     while not server.started:
         time.sleep(0.1)
 
-    up = upload(SAMPLE_WORKBOOK)
+    up = upload(make_workbook())
     suite_id, case_id = up["suite_id"], up["cases"][0]
-    check(case_id == "TS_EML001" and not up["warnings"], f"upload parsed {case_id} with no warnings")
+    check(case_id == CASE_ID and not up["warnings"], f"upload parsed {case_id} with no warnings")
 
     suite = storage.load_suite(suite_id)
     case = storage.find_case(suite, case_id)
     rec_session = sessions.start("record", record_session, suite_id=suite_id, case_id=case_id, suite=suite, case=case,
-                   start_url=f"{BASE}/mail/login", headless=True, on_ready=act_like_a_user)
+                   headless=True, on_ready=act_like_a_user)
     wait_idle()
     rec = storage.load_recording(suite_id, case_id)
     if not rec or rec["status"] != "completed":
@@ -140,7 +167,7 @@ def main():
     counts = [len(s["actions"]) for s in rec["steps"]]
     check(all(counts), f"every step has actions {counts}")
     params = sorted({a["param"] for s in rec["steps"] for a in s["actions"] if a.get("param")})
-    check(params == ["Body", "Password", "Subject", "To", "User Name"], f"values linked to Excel data {params}")
+    check(params == ["Name", "Notes", "Password", "Phone", "User Name"], f"values linked to Excel data {params}")
     nav = [a["target"] for s in rec["steps"] for a in s["actions"] if a.get("navigates")]
     check(len(nav) >= 3, f"page-loading clicks detected: {nav}")
 
@@ -148,20 +175,20 @@ def main():
     check(run["status"] == "passed", f"automated run passed ({run['passed']} steps, {run['duration_ms']}ms)")
     shots = list((storage.run_dir(run["id"]) / "screenshots").glob("*.png"))
     check(len(shots) == 5, f"{len(shots)} step screenshots saved")
-    ws = openpyxl.load_workbook(storage.run_dir(run["id"]) / "results.xlsx")["TS_EML001"]
+    ws = openpyxl.load_workbook(storage.run_dir(run["id"]) / "results.xlsx")[CASE_ID]
     statuses = [ws.cell(r, 8).value for r in range(11, 16)]
     check(statuses == ["Pass"] * 5, f"results workbook statuses {statuses}")
     check(ws.cell(5, 2).value == "Automation (prototype)", "tester name written back")
 
-    run2 = run_case(suite_id, case_id, {"Subject": "Changed subject from the dashboard"})
-    check(run2["status"] == "passed", "same automation passes with a different Subject")
-    check("Changed subject from the dashboard" in run2["steps"][4]["observed"],
+    run2 = run_case(suite_id, case_id, {"Name": "Changed name from the dashboard"})
+    check(run2["status"] == "passed", "same automation passes with a different Name")
+    check("Changed name from the dashboard" in run2["steps"][4]["observed"],
           f"check followed the new data: {run2['steps'][4]['observed']}")
 
-    run3 = run_case(suite_id, case_id, {"To": "not-an-email"})
+    run3 = run_case(suite_id, case_id, {"Phone": "not-a-number"})
     by = {s["step_id"]: s["status"] for s in run3["steps"]}
-    check(run3["status"] == "failed" and by["TS_EML001.4"] == "failed" and by["TS_EML001.5"] == "skipped",
-          f"bad data fails at the Send check and skips the rest: {by}")
+    check(run3["status"] == "failed" and by[f"{CASE_ID}.4"] == "failed" and by[f"{CASE_ID}.5"] == "skipped",
+          f"bad data fails at the Save check and skips the rest: {by}")
     print("   failure logged as:", run3["steps"][3]["error"][:140])
     print("\nAll smoke checks passed.")
     server.should_exit = True

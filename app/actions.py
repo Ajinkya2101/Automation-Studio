@@ -27,18 +27,23 @@ def resolved_steps(case_steps: list[dict], when: datetime | None = None) -> list
     return steps
 
 
-def start_url(case_steps: list[dict], default: str) -> str:
+NO_START_URL = ("This test has no start URL. Add a line such as 'URL: https://...' to the "
+                "test data of the first step in the Excel and upload it again.")
+
+
+def start_url(case_steps: list[dict]) -> str:
     """The first step's 'URL' test data says which application to open."""
     for s in case_steps:
         for k, v in s["data"].items():
             if k.strip().lower() == "url" and v.strip():
                 return v.strip()
-    return default
+    return ""
 
 
-def case_target(case: dict, default: str) -> str:
-    """Start URL of a test: given directly (recorded without Excel) or by the Excel URL data."""
-    return case.get("start_url") or start_url(case["steps"], default)
+def case_target(case: dict) -> str:
+    """Start URL of a test: given directly (recorded without Excel) or by the Excel URL data.
+    Empty when the Excel gives none."""
+    return case.get("start_url") or start_url(case["steps"])
 
 
 def substitute(value: str, data: dict[str, str]) -> str:
@@ -111,10 +116,14 @@ def describe(a: dict, data: dict | None = None) -> str:
         return f"Open {a['url']}"
     if t == "click":
         return f"Click {target}"
+    if t == "dblclick":
+        return f"Double-click {target}"
+    if t == "upload":
+        return f"Attach {', '.join(a.get('files', []))} to {target}"
     if t == "fill":
         return f"Type \"{_shown(a.get('value'), a, data)}\" into {target}"
     if t == "press":
-        return f"Press {a.get('key')} in {target}"
+        return f"Press {a.get('key')}" + ("" if a.get("global") else f" in {target}")
     if t == "select":
         return f"Select \"{_shown(a.get('value'), a, data)}\" in {target}"
     if t == "expect_text":

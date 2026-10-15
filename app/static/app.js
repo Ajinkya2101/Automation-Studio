@@ -85,7 +85,7 @@ function renderNewForm(main, notice) {
     <label for="nf-title">Test name</label>
     <input id="nf-title" placeholder="e.g. Update worker phone number" maxlength="120">
     <label for="nf-url">Start URL</label>
-    <input id="nf-url" placeholder="Leave empty for the Acme Mail demo, or paste https://…">
+    <input id="nf-url" placeholder="https://…">
     <div class="hint">For a site that needs a sign-in (e.g. Outlook or Fusion), you can sign in once before you record.</div>
     <div class="err-text" id="nf-error"></div>
     <div class="foot"><button class="btn" id="nf-cancel">Cancel</button><button class="btn primary" id="nf-create">Create test</button></div>
@@ -146,7 +146,6 @@ async function startRun() {
   const body = {
     headed: $('#opt-headed').checked,
     slow_mo: Number($('#opt-speed').value),
-    reset_mailbox: !!($('#opt-reset') && $('#opt-reset').checked),
     data,
   };
   try {
@@ -281,7 +280,7 @@ function renderMain() {
     main.innerHTML = `${notice}<div class="hero">
       <h1>Record once, then automate</h1>
       <p>Upload a test script, perform it once while the studio watches, then replay it automatically whenever you need, with a log of every step.
-        Try the <a href="/api/sample?name=acme">Acme Mail sample</a> (built-in demo app) or the <a href="/api/sample?name=outlook">Outlook sample</a> (sends a real email).</p>
+        No Excel? Click <b>Record without Excel</b> and just perform the test.</p>
       <div class="how">
         <div><span class="n">1</span><b>Upload the test Excel</b><span>Steps, test data and expected results come from the same template the implementation team uses. <a href="/api/sample">Download the sample</a>.</span></div>
         <div><span class="n">2</span><b>Record the steps</b><span>A browser opens with a toolbar showing each Excel step. Perform it; every click and entry is captured against that step.</span></div>
@@ -292,11 +291,10 @@ function renderMain() {
   const { case: c, suite, recording, runs, target } = S.detail;
   const busy = !!S.session;
   const recorded = !!recording;
-  const needsSignin = !target.is_demo;
+  const hasTarget = !!target.url;
   const signedIn = target.has_profile;
   const stepChip = (num, done, doneText, todoText) =>
     `<span class="st ${done ? 'done' : ''}"><i>${done ? '✓' : num}</i>${done ? doneText : todoText}</span>`;
-  const k = needsSignin ? 1 : 0;
   const freeform = !!c.freeform;
   const firstChip = freeform
     ? `<span class="st done"><i>✓</i>Test created${c.steps.length ? ` (${c.steps.length} steps)` : ''}</span>`
@@ -308,20 +306,21 @@ function renderMain() {
           : `${esc(suite.filename)} · uploaded ${esc(fmtDate(suite.uploaded_at))}`}</div>
         <h1>${esc(c.id)} · ${esc(c.title)}</h1>
         ${c.description ? `<p>${esc(c.description)}</p>` : ''}
-        <div class="target">Application under test: <code>${esc(target.url)}</code>
-          ${needsSignin ? (signedIn ? '<span class="badge passed">sign-in saved</span>' : '<span class="badge stopped">not signed in yet</span>') : '<span class="badge new">built-in demo app</span>'}</div>
+        <div class="target">Application under test: ${hasTarget
+          ? `<code>${esc(target.url)}</code> ${signedIn ? '<span class="badge passed">sign-in saved</span>' : '<span class="badge stopped">not signed in yet</span>'}`
+          : '<span class="badge failed">no start URL</span> Add a line such as <code>URL: https://…</code> to the test data of the first step in the Excel and upload it again.'}</div>
       </div>
       <div class="case-actions">
-        ${needsSignin ? `<button class="btn" id="btn-signin" data-needs-idle ${busy ? 'disabled' : ''}>${signedIn ? 'Sign in again' : 'Sign in'}</button>` : ''}
-        <button class="btn ${recorded ? '' : 'rec'}" id="btn-record" data-needs-idle ${busy ? 'disabled' : ''}><span class="dot"></span>${recorded ? 'Re-record' : 'Record steps'}</button>
+        <button class="btn" id="btn-signin" data-needs-idle ${busy || !hasTarget ? 'disabled' : ''}>${signedIn ? 'Sign in again' : 'Sign in'}</button>
+        <button class="btn ${recorded ? '' : 'rec'}" id="btn-record" data-needs-idle ${busy || !hasTarget ? 'disabled' : ''}><span class="dot"></span>${recorded ? 'Re-record' : 'Record steps'}</button>
         <button class="btn primary" id="btn-run" data-needs-idle ${busy || !recorded ? 'disabled' : ''} title="${recorded ? '' : 'Record the steps first'}">▶ Run automated</button>
       </div>
     </div>
     <div class="flow">
       ${firstChip}<span class="arrow">→</span>
-      ${needsSignin ? `${stepChip(2, signedIn, 'Signed in to the application', 'Sign in once')}<span class="arrow">→</span>` : ''}
-      ${stepChip(2 + k, recorded, `Recorded ${esc(fmtDate(recording && recording.recorded_at))}`, 'Record the steps once')}<span class="arrow">→</span>
-      ${stepChip(3 + k, runs.length, `${runs.length} automated run(s)`, 'Run automatically')}
+      ${stepChip(2, signedIn, 'Signed in to the application', 'Sign in once (if the application needs it)')}<span class="arrow">→</span>
+      ${stepChip(3, recorded, `Recorded ${esc(fmtDate(recording && recording.recorded_at))}`, 'Record the steps once')}<span class="arrow">→</span>
+      ${stepChip(4, runs.length, `${runs.length} automated run(s)`, 'Run automatically')}
     </div>
     <div id="run-form-slot"></div>
     <div id="live"></div>
@@ -337,8 +336,7 @@ function renderMain() {
     startRecording();
   };
   $('#btn-run').onclick = () => { S.runForm = !S.runForm; renderRunForm(); };
-  const signin = $('#btn-signin');
-  if (signin) signin.onclick = startSignin;
+  $('#btn-signin').onclick = startSignin;
   main.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { S.tab = b.dataset.tab; renderMain(); });
   renderRunForm();
   renderLive();
@@ -421,8 +419,10 @@ function describeAction(a) {
   switch (a.type) {
     case 'goto': return `Open <span class="mono">${esc(a.url)}</span>`;
     case 'click': return `Click ${esc(a.target)}`;
+    case 'dblclick': return `Double-click ${esc(a.target)}`;
+    case 'upload': return `Attach <span class="mono">${esc((a.files || []).join(', '))}</span> to ${esc(a.target)}`;
     case 'fill': return `Type “${withParams(val)}” into ${esc(a.target)}`;
-    case 'press': return `Press ${esc(a.key)} in ${esc(a.target)}`;
+    case 'press': return `Press ${esc(a.key)}${a.global ? '' : ` in ${esc(a.target)}`}`;
     case 'select': return `Select “${withParams(val)}” in ${esc(a.target)}`;
     case 'expect_text': return `Check that “${withParams(a.text)}” is visible`;
     case 'scroll': return `Scroll ${a.page ? 'the page' : esc(a.target)} to ${a.y || 0} px${a.x ? ` (across ${a.x} px)` : ''} <span class="chip">best effort</span>`;
@@ -433,9 +433,9 @@ function describeAction(a) {
 function renderAction(a) {
   const loc = a.locators && a.locators[0];
   const locText = loc ? (loc.kind === 'role' ? `role=${loc.role} name="${loc.value}"` : `${loc.kind}="${loc.value}"`) : '';
-  const labels = { goto: 'open', click: 'click', fill: 'type', press: 'key', select: 'select', expect_text: 'check', scroll: 'scroll' };
+  const labels = { goto: 'open', click: 'click', dblclick: 'click', upload: 'file', fill: 'type', press: 'key', select: 'select', expect_text: 'check', scroll: 'scroll' };
   return `<div class="act"><span class="type ${a.type}">${labels[a.type] || a.type}</span>
-    <div>${describeAction(a)}${a.navigates ? '<span class="chip">loads page</span>' : ''}
+    <div>${describeAction(a)}${a.navigates ? '<span class="chip">loads page</span>' : ''}${a.tab ? `<span class="chip">tab ${a.tab + 1}</span>` : ''}${a.frame ? '<span class="chip">in frame</span>' : ''}
     ${locText ? `<div class="loc">${esc(locText)}${a.locators.length > 1 ? ` <span title="Fallback locators used if the first one is not found">+${a.locators.length - 1} fallback</span>` : ''}</div>` : ''}</div></div>`;
 }
 
@@ -456,9 +456,8 @@ function renderRunForm() {
     <div class="opts">
       <label><input type="checkbox" id="opt-headed" checked> Show the browser while it runs</label>
       <label>Speed <select id="opt-speed"><option value="0">Fast</option><option value="250" selected>Normal</option><option value="700">Slow (demo)</option></select></label>
-      ${S.detail.target.is_demo ? '<label><input type="checkbox" id="opt-reset" checked> Reset Acme Mail test data first</label>' : ''}
     </div>
-    ${S.detail.target.is_demo ? '' : `<div class="notice warn" style="margin:0 0 14px">This runs against the real application at <b>${esc(S.detail.target.url)}</b>: anything the test does (such as sending an email) really happens.</div>`}
+    <div class="notice warn" style="margin:0 0 14px">This runs against the real application at <b>${esc(S.detail.target.url)}</b>: anything the test does (such as saving a record) really happens.</div>
     ${keys.length ? `<div class="data-grid">${keys.map(k => `
       <label for="d-${esc(k)}">${esc(k)}${linked.has(k) ? '' : ' <span class="chip">not used</span>'}</label>
       <input id="d-${esc(k)}" data-key="${esc(k)}" value="${esc(data[k])}" type="${/pass/i.test(k) ? 'password' : 'text'}">`).join('')}</div>` : ''}

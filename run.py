@@ -17,7 +17,6 @@ def main() -> None:
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     url = f"http://localhost:{PORT}"
     print(f"\n  Automation Studio (prototype)  ->  {url}")
-    print(f"  Acme Mail (demo target)       ->  {url}/mail/login")
     print("  Press Ctrl+C to stop.\n", flush=True)
     if "--no-browser" not in sys.argv and not IN_CONTAINER:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()

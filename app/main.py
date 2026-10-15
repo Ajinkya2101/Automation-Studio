@@ -1,5 +1,5 @@
-"""Automation Studio (prototype): dashboard API, live event stream and the
-Acme Mail target app, all served by one FastAPI process."""
+"""Automation Studio (prototype): dashboard API and live event stream, served
+by one FastAPI process."""
 import shutil
 import tempfile
 from datetime import datetime
@@ -10,11 +10,10 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import mockmail, storage
-from .actions import case_target
+from . import storage
+from .actions import MASK, NO_START_URL, case_target
 from .browser import signed_in_at
-from .config import (DATA_DIR, IN_CONTAINER, LIVE_VIEW_URL, OUTLOOK_WORKBOOK, SAMPLE_WORKBOOK,
-                     STATIC_DIR, TARGET_START_URL)
+from .config import DATA_DIR, IN_CONTAINER, LIVE_VIEW_URL, SAMPLE_WORKBOOK, STATIC_DIR
 from .events import BusyError, sessions
 from .excel_io import WorkbookError, build_workbook, parse_workbook
 from .recorder import record_session, signin_session
@@ -39,15 +38,16 @@ async def always_current_dashboard(request: Request, call_next):
     return response
 
 
-app.include_router(mockmail.router)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-app.mount("/artifacts", StaticFiles(directory=DATA_DIR), name="artifacts")
+# Only run output (screenshots) is served. The rest of data/ holds the browser profiles
+# with their sign-in cookies and the recordings with any password typed while recording.
+storage.RUNS.mkdir(parents=True, exist_ok=True)
+app.mount("/artifacts/runs", StaticFiles(directory=storage.RUNS), name="artifacts")
 
 
 class RunRequest(BaseModel):
     headed: bool = True
     slow_mo: int = 250
-    reset_mailbox: bool = True
     data: dict[str, str] = {}
 
 
@@ -62,6 +62,20 @@ def _suite_case(suite_id: str, case_id: str) -> tuple[dict, dict]:
     if not case:
         raise HTTPException(404, "Test case not found")
     return suite, case
+
+
+def _masked(recording: dict | None) -> dict | None:
+    """A recording for the dashboard: passwords typed while recording never leave the server."""
+    if recording:
+        for step in recording["steps"]:
+            step["actions"] = [{**a, "value": MASK} if a.get("masked") and not a.get("param") else a
+                               for a in step["actions"]]
+    return recording
+
+
+def _need_target(case: dict) -> None:
+    if not case_target(case):
+        raise HTTPException(400, NO_START_URL)
 
 
 def _start(kind, target, **kw):
@@ -93,9 +107,8 @@ def config():
 
 
 @app.get("/api/sample")
-def sample(name: str = "acme"):
-    path = OUTLOOK_WORKBOOK if name == "outlook" else SAMPLE_WORKBOOK
-    return FileResponse(path, filename=path.name)
+def sample():
+    return FileResponse(SAMPLE_WORKBOOK, filename=SAMPLE_WORKBOOK.name)
 
 
 @app.get("/api/cases")
@@ -137,9 +150,9 @@ async def upload(file: UploadFile = File(...)):
 @app.post("/api/freeform")
 def create_freeform(req: FreeformRequest):
     """A test without an Excel file: the steps are created while the user records."""
-    url = req.url.strip() or TARGET_START_URL
+    url = req.url.strip()
     if not url.startswith(("http://", "https://")):
-        raise HTTPException(400, "The start URL must begin with http:// or https://")
+        raise HTTPException(400, "Enter the start URL of the application to test, beginning with http:// or https://")
     case_id = f"REC-{datetime.now():%Y%m%d-%H%M%S}"
     title = req.title.strip() or f"Recorded test {datetime.now():%d %b %H:%M}"
     case = {"id": case_id, "sheet": case_id, "title": title, "description": f"Recorded without Excel on {url}",
@@ -165,13 +178,13 @@ def suite_workbook(suite_id: str):
 @app.get("/api/suites/{suite_id}/cases/{case_id}")
 def case_detail(suite_id: str, case_id: str):
     suite, case = _suite_case(suite_id, case_id)
-    target = case_target(case, TARGET_START_URL)
+    target = case_target(case)
     return {
         "suite": {k: suite.get(k) for k in ("id", "filename", "uploaded_at", "warnings", "source")},
         "case": case,
-        "target": {"url": target, "is_demo": target == TARGET_START_URL,
-                   "has_profile": bool(signed_in_at(target)), "signed_in_at": signed_in_at(target)},
-        "recording": storage.load_recording(suite_id, case_id),
+        "target": {"url": target, "has_profile": bool(target and signed_in_at(target)),
+                   "signed_in_at": signed_in_at(target) if target else None},
+        "recording": _masked(storage.load_recording(suite_id, case_id)),
         "runs": storage.list_runs(suite_id, case_id),
     }
 
@@ -179,6 +192,7 @@ def case_detail(suite_id: str, case_id: str):
 @app.post("/api/suites/{suite_id}/cases/{case_id}/signin")
 def start_signin(suite_id: str, case_id: str):
     suite, case = _suite_case(suite_id, case_id)
+    _need_target(case)
     s = _start("signin", signin_session, suite_id=suite_id, case_id=case_id, suite=suite, case=case)
     return s.info()
 
@@ -186,6 +200,7 @@ def start_signin(suite_id: str, case_id: str):
 @app.post("/api/suites/{suite_id}/cases/{case_id}/record")
 def start_recording(suite_id: str, case_id: str):
     suite, case = _suite_case(suite_id, case_id)
+    _need_target(case)
     s = _start("record", record_session, suite_id=suite_id, case_id=case_id, suite=suite, case=case)
     return s.info()
 
@@ -199,7 +214,7 @@ def start_run(suite_id: str, case_id: str, req: RunRequest):
     run_id = storage.new_id("run")
     s = _start("run", run_session, suite_id=suite_id, case_id=case_id, run_id=run_id,
                suite=suite, case=case, recording=recording, data=req.data, headed=req.headed,
-               slow_mo=max(0, min(req.slow_mo, 2000)), reset_mailbox=req.reset_mailbox)
+               slow_mo=max(0, min(req.slow_mo, 2000)))
     return s.info()
 
 
@@ -240,8 +255,3 @@ def run_results(run_id: str):
         raise HTTPException(404, "Results workbook not found")
     return FileResponse(path, filename=f"{run['case_id']}_{run_id}_results.xlsx")
 
-
-@app.post("/api/mailbox/reset")
-def reset_mailbox():
-    mockmail.reset_mailbox()
-    return {"ok": True}
