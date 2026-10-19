@@ -121,12 +121,16 @@ REM Give the container this PC's time zone (as a POSIX offset such as LOCAL-05:3
 REM so dashboard times and {now} in test data match your clock.
 set "TZ_POSIX=UTC"
 for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "$o=[TimeZoneInfo]::Local.GetUtcOffset([DateTime]::Now); $sign='-'; if ($o.Ticks -lt 0) { $sign='+' }; 'LOCAL{0}{1:00}:{2:00}' -f $sign, [Math]::Abs($o.Hours), [Math]::Abs($o.Minutes)"`) do set "TZ_POSIX=%%t"
+REM The PC's name and user label everything in the exported issue log; inside the
+REM container the host name is random.
 REM Ports are published on 127.0.0.1 only: the live view has no password, so
 REM it must not be reachable from other machines.
 docker run -d ^
     --name %CONTAINER_NAME% ^
     -e "STUDIO_LIVE_VIEW_URL=%LIVE_VIEW_URL%" ^
     -e "TZ=%TZ_POSIX%" ^
+    -e "STUDIO_DEVICE_NAME=%COMPUTERNAME%" ^
+    -e "STUDIO_OS_USER=%USERNAME%" ^
     -v "%DOCKER_PATH%:%WORKDIR%" ^
     -w %WORKDIR% ^
     -p 127.0.0.1:%HOST_PORT%:8010 ^

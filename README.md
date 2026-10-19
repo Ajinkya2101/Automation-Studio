@@ -71,6 +71,39 @@ python -m venv .venv
 
 The browser then opens as a normal window instead of in the live view.
 
+## Issue log (testing on several devices)
+
+Each tester's studio keeps the details needed to look into a problem from another computer.
+Export them as a ZIP and send it to whoever investigates:
+
+- **Export issue log** (top bar): every run on this device that did not pass, every sign-in,
+  recording and run session log, and the studio's own log. `/api/issue-log?include_passed=true`
+  includes passed runs too.
+- **Issue log** next to a run in *Run history* (or **Download issue log** after a failed run): that run only.
+
+Open `issues.xlsx` first. It has one row per problem (failed or stopped steps, crashes, fallback
+locators, recording warnings) and each row links to its screenshot, page HTML, trace and full log.
+Every row and run names the device, OS user, studio version and browser, so ZIPs from several
+testers can be compared side by side. Each run folder contains:
+
+| File | What it holds |
+|---|---|
+| `log.txt` | The run as a report: device, versions, test data, each step, and each failure with the page URL, browser errors, Playwright's full error and the traceback |
+| `trace.zip` | Playwright trace of a run that did not pass: every action with the page before and after it, network, console. Open with `playwright show-trace trace.zip` or at https://trace.playwright.dev |
+| `failure/*.html` | The page's HTML when a step failed or was stopped |
+| `browser_log.json` | Console errors, script errors, failed requests and HTTP errors during the run |
+| `screenshots/`, `results.xlsx`, `run.json` | As shown in the dashboard; `run.json` has every event |
+
+On disk, session logs are in `data/logs/sessions/` and the studio's log is `data/logs/app.log`.
+Deleting a test case keeps its session logs.
+Passwords (test data whose key contains "pass", and password fields typed while recording) are
+masked in all JSON and text files. Screenshots, page HTML, traces and `results.xlsx` show the application
+as it was, so they can include what the test typed.
+
+Settings: `STUDIO_TRACE=failures` (default), `always` or `off`. In the container, `start_container.bat` passes
+the PC's name and user as `STUDIO_DEVICE_NAME` / `STUDIO_OS_USER`; for a container created before
+this change, run `start_container.bat remove` and then start it again.
+
 ## How it works
 
 | Piece | File | Role |
@@ -80,6 +113,7 @@ The browser then opens as a normal window instead of in the live view.
 | Recorder | `app/recorder.py`, `app/recorder.js` | Injects the step toolbar and captures clicks, typing (form fields and rich-text editors), Enter and checks per Excel step, with several locator candidates each. Also runs the sign-in session |
 | Replayer | `app/replayer.py` | Runs the recording: tries locators most-stable-first, substitutes Excel data (`{now}` tokens resolved per run), waits for page loads, screenshots each step |
 | Live log | `app/events.py` | Event stream from the worker thread to the dashboard (Server-Sent Events) |
+| Issue log | `app/diagnostics.py` | Device and versions, failure capture (page, browser errors, trace), session logs, `app.log`, ZIP export with `issues.xlsx` |
 | Dashboard | `app/main.py`, `app/static/` | Upload, sign in, record, run, live monitor, live browser view, history, downloads |
 | Container | `Dockerfile`, `docker/entrypoint.sh`, `start_container.bat` | Xvfb virtual screen + noVNC live view + the studio |
 

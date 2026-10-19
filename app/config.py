@@ -28,3 +28,12 @@ SLOW_FACTOR = max(float(os.environ.get("STUDIO_SLOW_FACTOR", "1")), 0.1)
 
 # How long replay waits for an element or a check before failing a step.
 ACTION_TIMEOUT_MS = int(int(os.environ.get("STUDIO_ACTION_TIMEOUT_MS", "45000")) * SLOW_FACTOR)
+
+# Issue log. Each tester's device is named in everything it exports; in the container the
+# launcher passes the PC's name and user, since the container's own are random.
+LOGS_DIR = DATA_DIR / "logs"
+DEVICE_NAME = os.environ.get("STUDIO_DEVICE_NAME", "")
+OS_USER = os.environ.get("STUDIO_OS_USER", "")
+# Playwright trace of each run (open with `playwright show-trace trace.zip`):
+# "failures" keeps it for runs that did not pass, "always" for every run, "off" records none.
+TRACE = os.environ.get("STUDIO_TRACE", "failures").strip().lower()

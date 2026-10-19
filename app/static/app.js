@@ -420,6 +420,7 @@ function renderTab() {
         <td style="text-align:right;white-space:nowrap">
           <button class="btn small" data-view="${esc(r.id)}">View log</button>
           ${r.results_xlsx ? `<a class="btn small" href="${esc(r.results_xlsx)}">Results.xlsx</a>` : ''}
+          <a class="btn small" href="/api/runs/${esc(r.id)}/issue-log" title="This run's full errors, screenshots, page snapshots, trace, test case and recording as a ZIP">Issue log</a>
         </td></tr>`).join('')}</tbody></table></div>`;
     body.querySelectorAll('[data-view]').forEach(b => b.onclick = () => viewRun(b.dataset.view));
   }
@@ -570,7 +571,8 @@ function renderSummary(L) {
     return `<div class="summary passed">✓ ${esc(s.message)} <button class="btn small primary" id="sum-run" data-needs-idle ${S.session ? 'disabled' : ''}>▶ Run it automatically</button></div>`;
   }
   return `<div class="summary ${s.status}"><b>${s.status === 'passed' ? '✓' : '✕'} ${esc(s.message)}</b>
-    ${s.results_url ? `<a class="btn small" href="${esc(s.results_url)}">Download results Excel</a>` : ''}</div>`;
+    ${s.results_url ? `<a class="btn small" href="${esc(s.results_url)}">Download results Excel</a>` : ''}
+    ${L.run_id && s.status !== 'passed' ? `<a class="btn small" href="/api/runs/${esc(L.run_id)}/issue-log">Download issue log</a>` : ''}</div>`;
 }
 
 async function viewRun(runId) {
@@ -591,6 +593,16 @@ function openLightbox(src) {
   lb.hidden = false;
   lb.onclick = () => { lb.hidden = true; };
 }
+
+// Errors in the dashboard itself go to the studio's log, so they are in the exported issue log.
+function reportError(message, stack, where) {
+  fetch('/api/client-errors', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: String(message || ''), stack: String(stack || ''), where }),
+  }).catch(() => {});
+}
+window.addEventListener('error', e => reportError(e.message, e.error && e.error.stack, `${e.filename}:${e.lineno}`));
+window.addEventListener('unhandledrejection', e => reportError(e.reason && e.reason.message || e.reason, e.reason && e.reason.stack, 'promise'));
 
 // ------------------------------------------------------------------ boot
 (async function init() {

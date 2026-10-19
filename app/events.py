@@ -9,8 +9,12 @@ import json
 import secrets
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field
 from typing import Callable
+
+from .diagnostics import log as app_log
+from .diagnostics import save_session_log
 
 
 class EventLog:
@@ -65,6 +69,7 @@ class Session:
     log: EventLog = field(default_factory=EventLog)
     stop_event: threading.Event = field(default_factory=threading.Event)
     started_at: float = field(default_factory=time.time)
+    error: str | None = None  # traceback when the session crashed
 
     def info(self) -> dict:
         return {"id": self.id, "kind": self.kind, "suite_id": self.suite_id,
@@ -102,15 +107,21 @@ class SessionManager:
             self._active = s
 
         def runner():
+            app_log.info("%s session %s started for %s/%s%s", kind, s.id, suite_id, case_id,
+                         f" (run {run_id})" if run_id else "")
             try:
                 result = target(s, **kwargs)
                 if s.status == "running":
                     s.status = result or "completed"
             except Exception as exc:  # surface anything unexpected to the dashboard
                 s.status = "failed"
+                s.error = traceback.format_exc()
+                app_log.error("%s session %s crashed:\n%s", kind, s.id, s.error)
                 s.log.emit("error", f"Session failed: {exc}", level="error")
             finally:
                 s.log.emit("session_end", f"Session {s.status}", status=s.status)
+                save_session_log(s)
+                app_log.info("%s session %s ended: %s", kind, s.id, s.status)
                 s.log.close()
 
         threading.Thread(target=runner, name=f"{kind}-{s.id}", daemon=True).start()

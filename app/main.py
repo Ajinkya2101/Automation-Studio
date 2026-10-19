@@ -7,11 +7,12 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
+from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import storage
-from .actions import MASK, NO_START_URL, case_target
+from . import diagnostics, storage
+from .actions import NO_START_URL, case_target
 from .browser import signed_in_at
 from .config import DATA_DIR, IN_CONTAINER, LIVE_VIEW_URL, SAMPLE_WORKBOOK, STATIC_DIR
 from .events import BusyError, sessions
@@ -20,6 +21,8 @@ from .recorder import record_session, signin_session
 from .replayer import run_session
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+diagnostics.setup_logging()
+log = diagnostics.log
 
 app = FastAPI(title="Automation Studio (Prototype)")
 
@@ -36,6 +39,16 @@ async def always_current_dashboard(request: Request, call_next):
     if request.url.path == "/" or request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-cache"
     return response
+
+
+@app.middleware("http")
+async def log_server_errors(request: Request, call_next):
+    """Unexpected server errors go to data/logs/app.log, so they are in the issue log."""
+    try:
+        return await call_next(request)
+    except Exception:
+        log.exception("Server error on %s %s", request.method, request.url.path)
+        raise
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -62,15 +75,6 @@ def _suite_case(suite_id: str, case_id: str) -> tuple[dict, dict]:
     if not case:
         raise HTTPException(404, "Test case not found")
     return suite, case
-
-
-def _masked(recording: dict | None) -> dict | None:
-    """A recording for the dashboard: passwords typed while recording never leave the server."""
-    if recording:
-        for step in recording["steps"]:
-            step["actions"] = [{**a, "value": MASK} if a.get("masked") and not a.get("param") else a
-                               for a in step["actions"]]
-    return recording
 
 
 def _need_target(case: dict) -> None:
@@ -138,12 +142,15 @@ async def upload(file: UploadFile = File(...)):
         cases, warnings = parse_workbook(tmp_path)
     except WorkbookError as exc:
         tmp_path.unlink(missing_ok=True)
+        log.warning("Upload of %s refused: %s", file.filename, exc)
         raise HTTPException(400, str(exc))
     suite = {"id": storage.new_id("suite"), "filename": file.filename,
              "uploaded_at": storage.now_iso(), "warnings": warnings, "cases": cases}
     storage.suite_dir(suite["id"]).mkdir(parents=True, exist_ok=True)
     shutil.move(str(tmp_path), storage.workbook_path(suite["id"]))
     storage.save_suite(suite)
+    log.info("Uploaded %s as %s: %d case(s)%s", file.filename, suite["id"], len(cases),
+             "".join(f"\n  note: {w}" for w in warnings))
     return {"suite_id": suite["id"], "cases": [c["id"] for c in cases], "warnings": warnings}
 
 
@@ -184,7 +191,7 @@ def case_detail(suite_id: str, case_id: str):
         "case": case,
         "target": {"url": target, "has_profile": bool(target and signed_in_at(target)),
                    "signed_in_at": signed_in_at(target) if target else None},
-        "recording": _masked(storage.load_recording(suite_id, case_id)),
+        "recording": diagnostics.mask_recording(storage.load_recording(suite_id, case_id)),
         "runs": storage.list_runs(suite_id, case_id),
     }
 
@@ -196,6 +203,7 @@ def delete_case(suite_id: str, case_id: str):
     if s and s.suite_id == suite["id"] and s.case_id == case["id"]:
         raise HTTPException(409, "This test case is being recorded or run. Stop it before deleting.")
     storage.delete_case(suite, case["id"])
+    log.info("Deleted test case %s from %s (its session logs are kept)", case["id"], suite["id"])
     return {"ok": True}
 
 
@@ -265,3 +273,36 @@ def run_results(run_id: str):
         raise HTTPException(404, "Results workbook not found")
     return FileResponse(path, filename=f"{run['case_id']}_{run_id}_results.xlsx")
 
+
+def _download(path: Path, name: str) -> FileResponse:
+    return FileResponse(path, filename=name, media_type="application/zip",
+                        background=BackgroundTask(shutil.rmtree, path.parent, ignore_errors=True))
+
+
+@app.get("/api/runs/{run_id}/issue-log")
+def run_issue_log(run_id: str):
+    """One run's issue log as a ZIP: report, screenshots, page snapshots, trace, test case and recording."""
+    if not storage.load_run(run_id):
+        raise HTTPException(404, "Run not found")
+    return _download(*diagnostics.export_issue_log([run_id]))
+
+
+@app.get("/api/issue-log")
+def issue_log(include_passed: bool = False):
+    """This device's issue log as a ZIP: every run that did not pass (or every run), all session logs
+    and the studio's own log, with an Excel summary."""
+    return _download(*diagnostics.export_issue_log(None, include_passed))
+
+
+class ClientError(BaseModel):
+    message: str = ""
+    stack: str = ""
+    where: str = ""
+
+
+@app.post("/api/client-errors")
+def client_error(err: ClientError, request: Request):
+    """Errors in the dashboard itself, so they are in app.log too."""
+    log.error("Dashboard error (%s): %s\n%s\n  browser: %s", err.where[:200], err.message[:2000], err.stack[:4000],
+              request.headers.get("user-agent", ""))
+    return {"ok": True}

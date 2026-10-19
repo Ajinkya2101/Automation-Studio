@@ -15,7 +15,9 @@ from . import storage
 from .actions import (MissingDataError, describe, locator_label, resolve_tokens, resolved_steps,
                       substitute)
 from .browser import first_page, open_context
-from .config import ACTION_TIMEOUT_MS, DATA_DIR, SLOW_FACTOR
+from .config import ACTION_TIMEOUT_MS, DATA_DIR, SLOW_FACTOR, TRACE
+from .diagnostics import (BrowserLog, browser_info, capture_page, environment, error_details, mask_data,
+                          start_trace, stop_trace)
 from .events import Session
 from .excel_io import write_results
 
@@ -660,97 +662,54 @@ def run_session(session: Session, suite: dict, case: dict, recording: dict,
     test_data.update({k: resolve_tokens(v, now) for k, v in (data or {}).items() if v is not None})
     target_url = recording.get("start_url", "")
     names = {s["step_id"]: s["name"] for s in case["steps"]}
+    shown_data = mask_data(test_data)
 
+    # environment and test_data (passwords masked) are for the issue log: which device, versions and values.
     run = {"id": run_id, "suite_id": suite["id"], "case_id": case["id"], "title": case["title"],
            "started_at": storage.now_iso(), "finished_at": None, "status": "running",
-           "headed": headed, "data_overrides": sorted((data or {}).keys()),
+           "headed": headed, "slow_mo": slow_mo, "data_overrides": sorted((data or {}).keys()),
+           "recorded_at": recording.get("recorded_at"), "start_url": target_url,
+           "environment": environment(), "test_data": shown_data,
            "steps": [{"step_id": s["step_id"], "name": names.get(s["step_id"], s["name"]),
                       "status": "pending", "actions": len(s["actions"])} for s in recording["steps"]]}
     storage.save_run(run)
     t_run = time.time()
     log.emit("run_start", f"Run {run_id} started for {case['id']}: {len(run['steps'])} steps.",
              run_id=run_id, steps=[{"step_id": s["step_id"], "name": s["name"]} for s in run["steps"]])
-
-    shown_data = {k: ("••••••" if "pass" in k.lower() else v) for k, v in test_data.items()}
+    env = run["environment"]
+    log.emit("info", f"Device {env['device']} (user {env['os_user']}), studio {env['app_version']}, "
+             f"Playwright {env['packages']['playwright']}.")
     log.emit("info", "Test data: " + "; ".join(f"{k} = {v}" for k, v in shown_data.items()))
 
-    failed = stopped = False
-    prev = None  # the action before the current one, which may need repeating if it had no effect
     following = iter([a for s in recording["steps"] for a in s["actions"]][1:])  # the action after the current one
     with sync_playwright() as p:
         browser = open_context(p, target_url, headless=not headed,
                                slow_mo=slow_mo if headed else 0)
+        tracing = start_trace(browser, f"{case['id']} {run_id}")
+        blog = BrowserLog(browser)
         page = first_page(browser)
         page.set_default_timeout(ACTION_TIMEOUT_MS)
         net = _Network(browser)
-
-        for idx, (rstep, res) in enumerate(zip(recording["steps"], run["steps"])):
-            sid = rstep["step_id"]
-            if failed or stopped:
-                res.update(status="skipped", observed="Not run (an earlier step did not pass).")
-                log.emit("step_skipped", f"{sid} skipped", step_id=sid, idx=idx, level="warn")
-                continue
-
-            log.emit("step_start", f"{sid} · {res['name']}", step_id=sid, idx=idx)
-            t_step = time.time()
-            done, checks, error = 0, [], None
-            try:
-                for a in rstep["actions"]:
-                    if session.stop_event.is_set():
-                        raise Stopped()
-                    text = describe(a, test_data)
-                    t_act = time.time()
-                    try:
-                        warn = lambda msg: log.emit("info", msg, step_id=sid, idx=idx, level="warn")
-                        page = _tab(net, a, page, warn)
-                        used, cand = _execute(page, a, test_data, net, prev, warn, next(following, None))
-                        prev = a
-                    except (StepFailed, MissingDataError) as exc:
-                        raise StepFailed(f"{text}: {exc}") from exc
-                    except Stopped:
-                        raise
-                    except Exception as exc:
-                        raise StepFailed(f"{text}: {_short(exc)}") from exc
-                    done += 1
-                    if a["type"] == "expect_text":
-                        checks.append(substitute(a["text"], test_data))
-                    log.emit("action", text, step_id=sid, idx=idx, status="pass",
-                             ms=int((time.time() - t_act) * 1000), locator=used,
-                             level="warn" if cand else "info",
-                             note="primary locator not found; used a fallback" if cand else "")
-                status = "passed"
-            except Stopped:
-                status, stopped, error = "stopped", True, "Stopped by user"
-            except StepFailed as exc:
-                status, failed, error = "failed", True, str(exc)
-                log.emit("action", str(exc), step_id=sid, idx=idx, status="fail", level="error")
-                shown = _page_errors(page)
-                if shown:
-                    error += f". Application shows: {shown}"
-                    log.emit("info", f"Application shows: {shown}", step_id=sid, idx=idx, level="error")
-
-            shot = shots / f"{idx + 1:02d}_{sid}.png"
-            try:
-                page.screenshot(path=str(shot), timeout=5000)
-                shot_url = f"/artifacts/runs/{run_id}/screenshots/{shot.name}"
-            except Exception:
-                shot_url = None
-
-            observed = (f"Automated: {done} action(s) completed."
-                        + (f" Verified on screen: {'; '.join(checks)}." if checks else ""))
-            if error:
-                observed = f"Failed after {done} action(s): {error}"
-            ms = int((time.time() - t_step) * 1000)
-            res.update(status=status, observed=observed, duration_ms=ms, screenshot=shot_url, error=error)
-            log.emit("step_end", f"{sid} {status.upper()} ({ms / 1000:.1f}s)", step_id=sid, idx=idx,
-                     status=status, ms=ms, screenshot=shot_url, error=error,
-                     level={"passed": "success", "failed": "error"}.get(status, "warn"))
-            storage.save_run(run)
-
+        env["browser"] = browser_info(page)
         try:
-            browser.close()
+            _run_steps(session, run, recording, test_data, page, net, blog, shots, following)
         except Exception:
-            pass
+            run["crashed"] = True  # the session saves the traceback; keep the trace for it
+            raise
+        finally:
+            failed = any(s["status"] == "failed" for s in run["steps"]) or run.get("crashed", False)
+            stopped = any(s["status"] == "stopped" for s in run["steps"])
+            if tracing:
+                keep = failed or stopped or TRACE == "always"
+                run["trace"] = stop_trace(browser, rdir / "trace.zip" if keep else None)
+            try:
+                blog.save(rdir / "browser_log.json")
+            except Exception:
+                pass
+            try:
+                browser.close()
+            except Exception:
+                pass
 
     counts = {k: sum(1 for s in run["steps"] if s["status"] == k) for k in ("passed", "failed", "skipped")}
     run["status"] = "stopped" if stopped else ("failed" if failed else "passed")
@@ -771,3 +730,91 @@ def run_session(session: Session, suite: dict, case: dict, recording: dict,
     run["events"] = log.all()
     storage.save_run(run)
     return "completed" if run["status"] == "passed" else run["status"]
+
+
+def _run_steps(session: Session, run: dict, recording: dict, test_data: dict, page: Page,
+               net: "_Network", blog: BrowserLog, shots, following) -> None:
+    """Play each step in turn; after a failure or a stop the remaining steps are skipped."""
+    log = session.log
+    run_id = run["id"]
+    rdir = storage.run_dir(run_id)
+    failed = stopped = False
+    prev = None  # the action before the current one, which may need repeating if it had no effect
+    for idx, (rstep, res) in enumerate(zip(recording["steps"], run["steps"])):
+        sid = rstep["step_id"]
+        if failed or stopped:
+            res.update(status="skipped", observed="Not run (an earlier step did not pass).")
+            log.emit("step_skipped", f"{sid} skipped", step_id=sid, idx=idx, level="warn")
+            continue
+
+        log.emit("step_start", f"{sid} · {res['name']}", step_id=sid, idx=idx)
+        t_step = time.time()
+        done, checks, error, diag, a = 0, [], None, None, None
+        try:
+            for a in rstep["actions"]:
+                if session.stop_event.is_set():
+                    raise Stopped()
+                text = describe(a, test_data)
+                t_act = time.time()
+                try:
+                    warn = lambda msg: log.emit("info", msg, step_id=sid, idx=idx, level="warn")
+                    page = _tab(net, a, page, warn)
+                    used, cand = _execute(page, a, test_data, net, prev, warn, next(following, None))
+                    prev = a
+                except (StepFailed, MissingDataError) as exc:
+                    raise StepFailed(f"{text}: {exc}") from exc
+                except Stopped:
+                    raise
+                except Exception as exc:
+                    raise StepFailed(f"{text}: {_short(exc)}") from exc
+                done += 1
+                if a["type"] == "expect_text":
+                    checks.append(substitute(a["text"], test_data))
+                log.emit("action", text, step_id=sid, idx=idx, status="pass",
+                         ms=int((time.time() - t_act) * 1000), locator=used,
+                         level="warn" if cand else "info",
+                         note="primary locator not found; used a fallback" if cand else "")
+            status = "passed"
+        except Stopped:
+            status, stopped, error = "stopped", True, "Stopped by user"
+            diag = {"stopped_during": describe(a, test_data) if a else ""}
+        except StepFailed as exc:
+            status, failed, error = "failed", True, str(exc)
+            # The recorded action as replay saw it: which element, found which ways, in which tab or frame.
+            diag = {"error": error_details(exc),
+                    "action": {k: v for k, v in a.items() if k in ("type", "target", "locators", "tab", "frame",
+                                                                    "param", "navigates")}}
+            log.emit("action", str(exc), step_id=sid, idx=idx, status="fail", level="error")
+            shown = _page_errors(page)
+            if shown:
+                res["app_message"] = shown
+                error += f". Application shows: {shown}"
+                log.emit("info", f"Application shows: {shown}", step_id=sid, idx=idx, level="error")
+        if diag is not None:
+            # For the issue log: the page at that moment and what the browser reported during the step.
+            diag["page"] = capture_page(page, rdir / "failure", f"{idx + 1:02d}_{sid}")
+            diag["browser_log"] = blog.since(t_step)[-50:]
+            res["diagnostics"] = diag
+            if diag["page"].get("url"):
+                log.emit("info", f"Page at the time: {diag['page']['url']} \"{diag['page'].get('title', '')}\"",
+                         step_id=sid, idx=idx, level="warn")
+            for e in diag["browser_log"][-5:]:
+                log.emit("info", f"Browser {e['kind']}: {e['text'][:300]}", step_id=sid, idx=idx, level="warn")
+
+        shot = shots / f"{idx + 1:02d}_{sid}.png"
+        try:
+            page.screenshot(path=str(shot), timeout=5000)
+            shot_url = f"/artifacts/runs/{run_id}/screenshots/{shot.name}"
+        except Exception:
+            shot_url = None
+
+        observed = (f"Automated: {done} action(s) completed."
+                    + (f" Verified on screen: {'; '.join(checks)}." if checks else ""))
+        if error:
+            observed = f"Failed after {done} action(s): {error}"
+        ms = int((time.time() - t_step) * 1000)
+        res.update(status=status, observed=observed, duration_ms=ms, screenshot=shot_url, error=error)
+        log.emit("step_end", f"{sid} {status.upper()} ({ms / 1000:.1f}s)", step_id=sid, idx=idx,
+                 status=status, ms=ms, screenshot=shot_url, error=error,
+                 level={"passed": "success", "failed": "error"}.get(status, "warn"))
+        storage.save_run(run)

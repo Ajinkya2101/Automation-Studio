@@ -4,6 +4,7 @@ Run from the Prototype folder:  .venv\\Scripts\\python tests\\smoke_test.py
 Uses port 8765 so it does not clash with a running studio.
 """
 import asyncio
+import io
 import json
 import os
 import sys
@@ -12,6 +13,7 @@ import threading
 import time
 import urllib.request
 import uuid
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -136,6 +138,42 @@ def run_case(suite_id, case_id, data=None):
     return http("GET", f"/api/runs/{info['run_id']}")
 
 
+def check_issue_log(run):
+    """The failed run's issue log has what is needed to look into it on another computer."""
+    failed = run["steps"][3]
+    diag = failed.get("diagnostics") or {}
+    check(run["environment"]["device"] and run["environment"]["browser"].get("user_agent"),
+          f"run records its device and browser: {run['environment']['device']}")
+    check(diag.get("page", {}).get("url", "").startswith(BASE) and diag.get("error", {}).get("traceback"),
+          f"failed step keeps the page ({diag.get('page', {}).get('url')}) and the full traceback")
+    check(run.get("trace") and (storage.run_dir(run["id"]) / "trace.zip").exists(), "Playwright trace kept for the failed run")
+
+    for path, expect_runs in ((f"/api/runs/{run['id']}/issue-log", 1), ("/api/issue-log", 1)):
+        with urllib.request.urlopen(BASE + path, timeout=60) as r:
+            data = r.read()
+            name = r.headers.get("content-disposition", "")
+        z = zipfile.ZipFile(io.BytesIO(data))
+        files = z.namelist()
+        root = files[0].split("/")[0]
+        has = lambda suffix: any(f.endswith(suffix) for f in files)
+        check(all(has(s) for s in ("issues.xlsx", "README.txt", "environment.json", "app.log",
+                                   f"runs/{run['id']}/log.txt", f"runs/{run['id']}/trace.zip",
+                                   f"runs/{run['id']}/run.json", "recording.json", "case.json"))
+              and any("/failure/" in f and f.endswith(".html") for f in files)
+              and any("/sessions/" in f and "_record_" in f for f in files),
+              f"{path} exports {len(files)} files as {name.split('filename=')[-1]}")
+        ws = openpyxl.load_workbook(io.BytesIO(z.read(f"{root}/issues.xlsx")))["Issues"]
+        kinds = [ws.cell(r, 4).value for r in range(2, ws.max_row + 1)]
+        check("Step failed" in kinds, f"issues.xlsx lists the failure: {kinds}")
+        text = z.read(f"{root}/runs/{run['id']}/log.txt").decode("utf-8")
+        check("Full error from Playwright" in text and "Page:" in text, "log.txt has the page and full error")
+        exported = z.read(f"{root}/runs/{run['id']}/run.json").decode("utf-8") + "".join(
+            z.read(f).decode("utf-8") for f in files if f.endswith((".json", ".txt", ".log")) and "/runs/" not in f)
+        check("demo123" not in exported, "the password is masked in everything exported as text")
+        runs_ws = openpyxl.load_workbook(io.BytesIO(z.read(f"{root}/issues.xlsx")))["Runs"]
+        check(runs_ws.max_row - 1 == expect_runs, f"{runs_ws.max_row - 1} run(s) in the export (passed runs left out)")
+
+
 def check(cond, msg):
     print(("PASS  " if cond else "FAIL  ") + msg)
     if not cond:
@@ -190,6 +228,7 @@ def main():
     check(run3["status"] == "failed" and by[f"{CASE_ID}.4"] == "failed" and by[f"{CASE_ID}.5"] == "skipped",
           f"bad data fails at the Save check and skips the rest: {by}")
     print("   failure logged as:", run3["steps"][3]["error"][:140])
+    check_issue_log(run3)
     print("\nAll smoke checks passed.")
     server.should_exit = True
 
