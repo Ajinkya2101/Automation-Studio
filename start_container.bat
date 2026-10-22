@@ -71,7 +71,7 @@ REM Build image if missing.
 docker image inspect %IMAGE% >NUL 2>&1
 if errorlevel 1 (
     echo Image %IMAGE% not found. Building. The first build takes a few minutes...
-    docker build -t %IMAGE% .
+    call :build_image
     if errorlevel 1 (
         echo [start_container] image build failed.
         goto :fail
@@ -104,7 +104,7 @@ goto :open
 :build
 call :ensure_docker || goto :fail
 echo Force-rebuilding %IMAGE%...
-docker build -t %IMAGE% .
+call :build_image
 if errorlevel 1 (
     echo [start_container] image build failed.
     goto :fail
@@ -114,6 +114,16 @@ docker rm -f %CONTAINER_NAME% >NUL 2>&1
 call :create_container || goto :fail
 call :wait_healthy || goto :fail
 goto :open
+
+:build_image
+REM Retries cover flaky downloads (PyPI, Chromium). Finished layers are cached,
+REM so each attempt resumes at the step that failed.
+for /l %%a in (1,1,3) do (
+    docker build -t %IMAGE% .
+    if !ERRORLEVEL! equ 0 exit /b 0
+    if %%a lss 3 echo [start_container] build attempt %%a failed. Retrying...
+)
+exit /b 1
 
 :create_container
 echo Creating new container %CONTAINER_NAME%...

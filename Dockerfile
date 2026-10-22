@@ -6,6 +6,8 @@ FROM python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=10 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     DISPLAY=:99
 
@@ -15,8 +17,9 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
- && playwright install --with-deps chromium \
+# Separate layers so a failed Chromium download does not redo the pip install.
+RUN pip install --no-cache-dir -r requirements.txt
+RUN playwright install --with-deps chromium \
  && rm -rf /var/lib/apt/lists/*
 
 # The code is copied so the image works on its own; start_container.bat also
