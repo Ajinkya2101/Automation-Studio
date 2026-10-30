@@ -17,7 +17,8 @@ from typing import Callable
 from playwright.sync_api import Page, sync_playwright
 
 from . import storage
-from .actions import NO_START_URL, case_target, describe, parameterize, resolved_steps
+from .actions import (DOUBLE_CLICK_S, NO_START_URL, case_target, describe, parameterize, repeated_click,
+                      resolved_steps)
 from .browser import first_page, mark_signed_in, open_context
 from .excel_io import build_workbook
 from .events import Session
@@ -153,6 +154,7 @@ def record_session(session: Session, suite: dict, case: dict, start_url: str | N
     for s in rec_steps:
         for a in s["actions"]:
             a.pop("el", None)  # only meant something while the page was open
+            a.pop("clicks", None)
     if freeform:
         steps, rec_steps = _build_freeform_case(suite, case, steps, rec_steps)
     linked = parameterize(rec_steps, steps)
@@ -185,11 +187,17 @@ def append_action(cur: list[dict], action: dict) -> None:
     if action["type"] in ("fill", "scroll") and cur and cur[-1]["type"] == action["type"] and same_place(cur[-1]):
         cur[-1] = action
         return
+    # A double-click that the page turned into two clicks keeps only the first (see repeated_click).
+    if cur and (repeated_click(cur[-1], action) or (
+            action["type"] == "click" and cur[-1]["type"] == "click" and same_place(cur[-1])
+            and 0 <= action.get("recorded_at", 0) - cur[-1].get("recorded_at", -1) < DOUBLE_CLICK_S)):
+        cur[-1]["clicks"] = cur[-1].get("clicks", 1) + 1
+        return
     if action["type"] == "dblclick":
         # The browser reports a double-click after the two clicks it is made of.
-        for _ in range(2):
-            if cur and cur[-1]["type"] == "click" and same_place(cur[-1]):
-                cur.pop()
+        left = 2
+        while left > 0 and cur and cur[-1]["type"] == "click" and same_place(cur[-1]):
+            left -= cur.pop().get("clicks", 1)
     cur.append(action)
 
 

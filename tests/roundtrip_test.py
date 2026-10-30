@@ -46,6 +46,7 @@ PAGE = """<!doctype html><html><body style="font-family:sans-serif;margin:20px">
   <div id="inside" style="position:absolute;inset:0;padding:10px">Business Unit</div></div><div id="drop"></div>
 <a href="/second" target="_blank" id="pop">Open report</a>
 <div id="keys" tabindex="0">Shortcut area</div><span id="ko"></span>
+<label for="reg">Region</label> <select id="reg"><option value="0"></option><option value="1">East</option><option value="2">West</option></select>
 <script>
 const $ = id => document.getElementById(id);
 let n = 0;
@@ -224,6 +225,12 @@ def main() -> None:
             p.click("[role=option]")
         case("dropdown opened by the label drawn over its field", covered,
              ['click div "Business Unit"', 'click option "CACBC"'], value("#bu"))
+
+        # Oracle ADF numbers its options (0, 1, 2): the choice is saved by its text, not that number.
+        acts, _ = case("option chosen in a dropdown", lambda p: p.select_option("#reg", "2"),
+                       ['select combobox "Region"'], value("#reg"))
+        if not acts or acts[0].get("value") != "West":
+            failures.append(f"the dropdown choice is saved as {acts[0].get('value') if acts else None!r}, not its text 'West'")
 
         def shortcut(p):
             p.click("#keys")

@@ -97,8 +97,10 @@ testers can be compared side by side. Each run folder contains:
 On disk, session logs are in `data/logs/sessions/` and the studio's log is `data/logs/app.log`.
 Deleting a test case keeps its session logs.
 Passwords (test data whose key contains "pass", and password fields typed while recording) are
-masked in all JSON and text files. Screenshots, page HTML, traces and `results.xlsx` show the application
-as it was, so they can include what the test typed.
+masked in all JSON and text files. Screenshots, page HTML and `results.xlsx` show the application
+as it was, so they can include what the test typed. A trace never holds a password typed into a password
+field: it starts once no typed password is on screen (so it leaves out the sign-in), and any copy that
+still reaches it, such as the sign-in request, is replaced with `******`.
 
 Settings: `STUDIO_TRACE=failures` (default), `always` or `off`. In the container, `start_container.bat` passes
 the PC's name and user as `STUDIO_DEVICE_NAME` / `STUDIO_OS_USER`; for a container created before
@@ -128,6 +130,8 @@ Test data tokens: `{now}` (2026-09-25 14:32:10), `{date}`, `{time}`, `{stamp}` (
 .venv\Scripts\python tests\menu_scroll_test.py   # Fusion-style menus: script-driven groups, scroll-loaded items
 .venv\Scripts\python tests\roundtrip_test.py     # record, replay on a fresh page, compare the end state: rows, iframes,
                                                  # tabs, web components, keys, double-click, hover menus, covered fields, uploads
+.venv\Scripts\python tests\recording_fixes_test.py # Fusion issue-log cases: list left open over OK, a choice the next
+                                                 # field resets, a double-click recorded as two clicks, no password in traces
 ```
 
 The studio ships no application under test. The tests serve their own pages; `tests/demo_site.py`

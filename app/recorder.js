@@ -421,7 +421,13 @@
     if (fromToolbar(e)) return;
     const el = targetOf(e);
     if (el.tagName === 'SELECT') {
-      send(act('select', el, { value: el.value }), el);
+      // The chosen option's text, not its value: Oracle ADF numbers its options (0, 1, 2), so
+      // the value says nothing about the choice and points elsewhere when the list changes.
+      // Replay picks an option by either. The value stays when the text is blank or repeated.
+      const opt = el.selectedOptions[0];
+      const text = opt ? clean(opt.label) : '';
+      const unique = text && Array.from(el.options).filter(o => clean(o.label) === text).length === 1;
+      send(act('select', el, { value: unique ? text : el.value }), el);
     } else if (el.tagName === 'INPUT' && el.type === 'file') {
       const files = Array.from(el.files || []).map(f => f.name);
       if (files.length) send(act('upload', el, { files }), el);

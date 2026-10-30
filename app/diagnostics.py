@@ -12,6 +12,7 @@ page snapshots, traces and results.xlsx show the application as it was, so they
 carry whatever the test typed or the page displayed.
 """
 import getpass
+import html
 import json
 import logging
 import platform
@@ -23,6 +24,7 @@ import sys
 import tempfile
 import time
 import traceback
+import urllib.parse
 import zipfile
 from collections import deque
 from datetime import datetime
@@ -254,11 +256,83 @@ def start_trace(ctx, title: str) -> bool:
         return False
 
 
-def stop_trace(ctx, path: Path | None) -> bool:
+# A password field with something typed in it, in this frame.
+SECRET_JS = "() => Array.from(document.querySelectorAll('input[type=password]')).some(i => i.value)"
+
+
+def secret_on_screen(ctx) -> bool:
+    """A password is typed into a field in any tab or frame."""
+    for pg in ctx.pages:
+        for frame in pg.frames:
+            try:
+                if frame.evaluate(SECRET_JS):
+                    return True
+            except Exception:  # navigating or detached: no field to read
+                continue
+    return False
+
+
+def pause_trace(ctx) -> bool:
+    """Drop what the trace holds so far and stop adding to it.
+
+    A trace keeps whatever the run typed, in several places: the typing itself,
+    copies of the page with the field's value, the sign-in request. So before a
+    password is typed, the trace so far is dropped and recording stops until no
+    password is on screen (resume_trace). The trace then starts after the sign-in.
+    """
+    try:
+        ctx.tracing.stop_chunk()
+        return True
+    except Exception as exc:
+        log.warning("Could not pause the Playwright trace: %s", exc)
+        return False
+
+
+def resume_trace(ctx) -> bool:
+    try:
+        ctx.tracing.start_chunk()
+        return True
+    except Exception as exc:
+        log.warning("Could not resume the Playwright trace: %s", exc)
+        return False
+
+
+def scrub_trace(path: Path, secrets: list[str]) -> None:
+    """Replace every copy of the secrets in a saved trace, as typed, JSON-escaped or URL-encoded.
+
+    The last line of defence after pause_trace: a request the page sent while the
+    trace was paused is still written to it once its answer arrives, which can be
+    after the trace resumed (the sign-in request, with the password in its body).
+    """
+    forms = set()
+    for s in secrets:
+        if len(s) >= 4:  # shorter strings occur everywhere by chance
+            forms.update({s, json.dumps(s)[1:-1], urllib.parse.quote(s, safe=""), urllib.parse.quote_plus(s),
+                          html.escape(s)})
+    forms = sorted((f.encode("utf-8") for f in forms), key=len, reverse=True)
+    if not forms:
+        return
+    with zipfile.ZipFile(path) as z:
+        entries = [(info, z.read(info)) for info in z.infolist()]
+    if not any(f in data for _, data in entries for f in forms):
+        return
+    tmp = path.with_suffix(".scrub")
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as out:
+        for info, data in entries:
+            for f in forms:
+                data = data.replace(f, b"******")
+            out.writestr(info, data)
+    tmp.replace(path)
+
+
+def stop_trace(ctx, path: Path | None, paused: bool = False, secrets: list[str] | None = None) -> bool:
     """Save the trace to path, or drop it when path is None. True when a trace file was written."""
+    if paused:
+        resume_trace(ctx)  # tracing only stops from a running chunk; this one stays empty
     try:
         if path and TRACE in ("failures", "always"):
             ctx.tracing.stop(path=str(path))
+            scrub_trace(path, secrets or [])
             return True
         ctx.tracing.stop()
     except Exception as exc:

@@ -12,12 +12,12 @@ from playwright.sync_api import Page, expect, sync_playwright
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
 from . import storage
-from .actions import (MissingDataError, describe, locator_label, resolve_tokens, resolved_steps,
-                      substitute)
+from .actions import (MissingDataError, describe, locator_label, repeated_click, resolve_tokens,
+                      resolved_steps, substitute)
 from .browser import first_page, open_context
 from .config import ACTION_TIMEOUT_MS, DATA_DIR, SLOW_FACTOR, TRACE
 from .diagnostics import (BrowserLog, browser_info, capture_page, environment, error_details, mask_data,
-                          start_trace, stop_trace)
+                          pause_trace, resume_trace, secret_on_screen, start_trace, stop_trace)
 from .events import Session
 from .excel_io import write_results
 
@@ -433,7 +433,60 @@ def _execute(page: Page, a: dict, data: dict, net: "_Network | None" = None, pre
     if a["type"] == "fill":
         _check_fill(page, a, data, net)
         _commit(page, a, net, nxt)
+    elif a["type"] == "select":
+        _check_select(page, a, data, net)
     return result
+
+
+# The chosen option of a dropdown: its value and its text.
+SELECTED_JS = "el => el.selectedOptions && el.selectedOptions.length ? [el.value, el.selectedOptions[0].label.trim()] : ['', '']"
+
+
+def _selected(page: Page, a: dict) -> list[str] | None:
+    """What the dropdown of a select action shows now; None when it is no longer on the page."""
+    try:
+        loc, _ = _resolve(_scope(page, a), _candidates(a["locators"]), a.get("target", "list"),
+                          timeout_ms=0, css_grace_s=0)
+        return loc.evaluate(SELECTED_JS, timeout=2000)
+    except Exception:
+        return None
+
+
+def _check_select(page: Page, a: dict, data: dict, net: "_Network | None") -> None:
+    """Make sure the chosen option is still chosen once the app settles; choose it again once if not."""
+    value = substitute(a.get("value", ""), data)
+    got = _selected(page, a)
+    if got is None or value in got:
+        return
+    loc, _ = _resolve(_scope(page, a), _candidates(a["locators"]), a.get("target", "list"))
+    loc.select_option(value)
+    _settle(page, net)
+
+
+def _undone_picks(page: Page, picked: list[dict], a: dict, data: dict) -> list[str]:
+    """Dropdown choices made earlier in the run that action `a` undid.
+
+    Classic Fusion pages reset some lists when a field they depend on changes:
+    choosing the Customer of a sales order clears its Business Unit. The run then
+    fails much later, at whatever needed that choice, with an error that does not
+    point at the cause. Each earlier choice is read again after every action, and
+    one that changed is reported right there. A list that is no longer on the
+    page is not watched any more.
+    """
+    out = []
+    for p in list(picked):
+        if p["action"] is a:
+            continue
+        got = _selected(page, p["action"])
+        if got is None:
+            picked.remove(p)
+        elif p["shown"] not in got:
+            picked.remove(p)
+            out.append(f"{p['action'].get('target', 'A list')} no longer shows \"{p['shown']}\" "
+                       f"(now \"{got[1] or 'blank'}\") after: {describe(a, data)}. The application resets that "
+                       "list when this changes, so choose it again after this action (re-record the choice "
+                       "after it).")
+    return out
 
 
 # Leaves the field with Tab's effect on the value (blur + change) on classic Fusion pages only.
@@ -508,6 +561,7 @@ def _perform(page: Page, a: dict, data: dict, net: "_Network | None" = None, pre
 
     candidates, loc, idx = _find(page, a, data, net, prev, note)
     used =locator_label(candidates[idx]) + (" (under aria-hidden)" if candidates[idx].get("include_hidden") else "")
+    _check_position(a, candidates[idx], loc, note)
     try:
         _act(page, a, data, loc, note)
     except StepFailed:
@@ -522,6 +576,25 @@ def _perform(page: Page, a: dict, data: dict, net: "_Network | None" = None, pre
                 "Re-record this step so the control is saved by its name.") from exc
         raise
     return used, idx
+
+
+def _check_position(a: dict, cand: dict, loc, note) -> None:
+    """Warn when a click found its element only by its position in the page, and that element
+    shows other text than was clicked when recording: a row of a list picked by position can
+    be another value than the one recorded. Only a warning, as the text can legitimately change
+    (a message with this run's order number)."""
+    if a["type"] not in ("click", "dblclick") or cand["kind"] != "css" or "nth-of-type" not in cand["value"]:
+        return
+    text = next((_clean(c["value"]) for c in a.get("locators", []) if c["kind"] == "text"), "")
+    if not text:
+        return
+    try:
+        shown = _clean(loc.inner_text(timeout=2000))
+    except Exception:
+        return
+    if text not in shown:
+        note(f"{a.get('target', 'The element')} was not found by its text, and the element at its recorded "
+             f"position shows \"{shown[:60]}\" instead. If a later action fails, this click is the likely cause.")
 
 
 COVERED = re.compile(r"(<[^\n]*?) intercepts pointer events")
@@ -539,8 +612,27 @@ LOV_FIELD_JS = """el => {
 }"""
 
 
+# The popup (a list, menu or dialog) drawn over the spot a click aims at, when the element
+# is not part of it: e.g. a list of values left open over a dialog's OK button. Null otherwise.
+COVERING_POPUP_JS = """(el, pos) => {
+  const r = el.getBoundingClientRect();
+  const hit = document.elementFromPoint(r.left + (pos ? pos[0] : r.width / 2), r.top + (pos ? pos[1] : r.height / 2));
+  if (!hit || el.contains(hit) || hit.contains(el)) return null;
+  const popup = hit.closest('[data-afr-popupid], [role=listbox], [role=menu], [role=dialog], [role=alertdialog], ' +
+                            '.oj-popup, .oj-listbox-drop');
+  return popup && !popup.contains(el) ? popup.outerHTML.slice(0, 120) : null;
+}"""
+
+
+def _covering_popup(loc, a: dict) -> str | None:
+    try:
+        return loc.evaluate(COVERING_POPUP_JS, a.get("pos"), timeout=2000)
+    except Exception:
+        return None
+
+
 def _click(loc, a: dict, note, double: bool = False) -> None:
-    """Click like a person does: at the element, whatever happens to be drawn over it.
+    """Click like a person does: at the element, whatever part of it is drawn over it.
 
     The automation normally refuses to click an element that something else covers.
     That is right while a loading mask is up, so the element first gets time to be
@@ -548,8 +640,13 @@ def _click(loc, a: dict, note, double: bool = False) -> None:
     label drawn inside an Oracle Redwood dropdown); a person's click lands on that
     part and the control reacts. So after the wait, the click is made at the same
     spot regardless.
+
+    Not when what covers it is another popup, such as a list an earlier pick left
+    open over a dialog's OK button: a click there picks from the list instead. The
+    popup gets Escape to close it; if it stays, the step fails.
     """
     do = loc.dblclick if double else loc.click
+    target = a.get("target", "The element")
     try:
         if loc.evaluate(LOV_FIELD_JS, timeout=2000):
             loc.page.wait_for_timeout(300)  # let the field's focus handlers run
@@ -560,13 +657,32 @@ def _click(loc, a: dict, note, double: bool = False) -> None:
         kw["position"] = {"x": a["pos"][0], "y": a["pos"][1]}
     try:
         do(timeout=COVERED_CLICK_MS, **kw)
+        return
     except PlaywrightTimeout as exc:
         covered = COVERED.search(str(exc))
         if not covered:
             raise
-        note(f"{a.get('target', 'The element')} is covered by {covered.group(1)[:120]}, so the click was made "
-             "at its position, as a person's click would be.")
-        do(force=True, timeout=5000, **kw)
+    popup = _covering_popup(loc, a)
+    if popup:
+        note(f"{target} is covered by a list or popup that is still open ({popup}), so Escape was pressed "
+             "to close it.")
+        loc.page.keyboard.press("Escape")
+        loc.page.wait_for_timeout(500)
+        try:
+            do(timeout=5000, **kw)
+            return
+        except PlaywrightTimeout as exc:
+            covered = COVERED.search(str(exc))
+            if not covered:
+                raise
+        if _covering_popup(loc, a):
+            raise StepFailed(
+                f"{target} is covered by a list or popup that is not part of it ({popup}), and Escape did not "
+                "close it. A click at its position would land in that popup instead, so the step stops here. "
+                "Usually an earlier pick left a list open: re-record so the list is closed before this click.")
+    note(f"{target} is covered by {covered.group(1)[:120]}, so the click was made "
+         "at its position, as a person's click would be.")
+    do(force=True, timeout=5000, **kw)
 
 
 def _act(page: Page, a: dict, data: dict, loc, note=lambda msg: None) -> None:
@@ -685,23 +801,24 @@ def run_session(session: Session, suite: dict, case: dict, recording: dict,
     with sync_playwright() as p:
         browser = open_context(p, target_url, headless=not headed,
                                slow_mo=slow_mo if headed else 0)
-        tracing = start_trace(browser, f"{case['id']} {run_id}")
+        trace = {"on": start_trace(browser, f"{case['id']} {run_id}"), "paused": False}
         blog = BrowserLog(browser)
         page = first_page(browser)
         page.set_default_timeout(ACTION_TIMEOUT_MS)
         net = _Network(browser)
         env["browser"] = browser_info(page)
         try:
-            _run_steps(session, run, recording, test_data, page, net, blog, shots, following)
+            _run_steps(session, run, recording, test_data, page, net, blog, shots, following, trace)
         except Exception:
             run["crashed"] = True  # the session saves the traceback; keep the trace for it
             raise
         finally:
             failed = any(s["status"] == "failed" for s in run["steps"]) or run.get("crashed", False)
             stopped = any(s["status"] == "stopped" for s in run["steps"])
-            if tracing:
+            if trace["on"]:
                 keep = failed or stopped or TRACE == "always"
-                run["trace"] = stop_trace(browser, rdir / "trace.zip" if keep else None)
+                run["trace"] = stop_trace(browser, rdir / "trace.zip" if keep else None, trace["paused"],
+                                          _secrets(recording, test_data))
             try:
                 blog.save(rdir / "browser_log.json")
             except Exception:
@@ -732,14 +849,30 @@ def run_session(session: Session, suite: dict, case: dict, recording: dict,
     return "completed" if run["status"] == "passed" else run["status"]
 
 
+def _secrets(recording: dict, data: dict) -> list[str]:
+    """The passwords a run types: values of the masked fields."""
+    out = []
+    for s in recording["steps"]:
+        for a in s["actions"]:
+            if a.get("masked"):
+                try:
+                    out.append(substitute(a.get("value", ""), data))
+                except MissingDataError:
+                    pass
+    return out
+
+
 def _run_steps(session: Session, run: dict, recording: dict, test_data: dict, page: Page,
-               net: "_Network", blog: BrowserLog, shots, following) -> None:
+               net: "_Network", blog: BrowserLog, shots, following, trace: dict | None = None) -> None:
     """Play each step in turn; after a failure or a stop the remaining steps are skipped."""
     log = session.log
     run_id = run["id"]
     rdir = storage.run_dir(run_id)
+    trace = trace or {"on": False, "paused": False}
     failed = stopped = False
     prev = None  # the action before the current one, which may need repeating if it had no effect
+    picked = []  # dropdown choices made so far, read again after each action (see _undone_picks)
+    undone = []  # choices that a later action undid: the likely cause if the run fails later
     for idx, (rstep, res) in enumerate(zip(recording["steps"], run["steps"])):
         sid = rstep["step_id"]
         if failed or stopped:
@@ -756,11 +889,34 @@ def _run_steps(session: Session, run: dict, recording: dict, test_data: dict, pa
                     raise Stopped()
                 text = describe(a, test_data)
                 t_act = time.time()
-                try:
-                    warn = lambda msg: log.emit("info", msg, step_id=sid, idx=idx, level="warn")
-                    page = _tab(net, a, page, warn)
-                    used, cand = _execute(page, a, test_data, net, prev, warn, next(following, None))
+                nxt = next(following, None)
+                warn = lambda msg: log.emit("info", msg, step_id=sid, idx=idx, level="warn")
+                if repeated_click(prev, a):
+                    # Recorded before the recorder merged these: replayed, the click finds nothing left.
+                    warn(f"{text} skipped: it is the second half of a double-click on the same element, "
+                         "recorded as two clicks.")
                     prev = a
+                    done += 1
+                    continue
+                if a.get("masked") and trace["on"] and not trace["paused"]:
+                    trace["paused"] = pause_trace(page.context)
+                    if trace["paused"]:
+                        log.emit("info", "The trace leaves out the sign-in: it starts once no password is on "
+                                 "screen, so the password is not saved in it.", step_id=sid, idx=idx)
+                try:
+                    page = _tab(net, a, page, warn)
+                    used, cand = _execute(page, a, test_data, net, prev, warn, nxt)
+                    prev = a
+                    if a["type"] == "select":
+                        shown = _selected(page, a)
+                        if shown and shown[1]:
+                            picked.append({"action": a, "shown": shown[1]})
+                    if picked and a["type"] not in ("expect_text", "scroll"):
+                        for msg in _undone_picks(page, picked, a, test_data):
+                            undone.append(msg)
+                            warn(msg)
+                    if trace["paused"] and not secret_on_screen(page.context):
+                        trace["paused"] = not resume_trace(page.context)
                 except (StepFailed, MissingDataError) as exc:
                     raise StepFailed(f"{text}: {exc}") from exc
                 except Stopped:
@@ -790,6 +946,8 @@ def _run_steps(session: Session, run: dict, recording: dict, test_data: dict, pa
                 res["app_message"] = shown
                 error += f". Application shows: {shown}"
                 log.emit("info", f"Application shows: {shown}", step_id=sid, idx=idx, level="error")
+            if undone:
+                error += f". Likely cause, earlier in the run: {undone[-1]}"
         if diag is not None:
             # For the issue log: the page at that moment and what the browser reported during the step.
             diag["page"] = capture_page(page, rdir / "failure", f"{idx + 1:02d}_{sid}")
