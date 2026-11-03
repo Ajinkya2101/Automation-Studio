@@ -618,8 +618,11 @@ results.xlsx show the application as it was, including anything the test typed.
 """
 
 
-def export_issue_log(run_ids: list[str] | None = None, include_passed: bool = False) -> tuple[Path, str]:
-    """Pack the issue log into a ZIP. run_ids None means every run on this device.
+def export_issue_log(run_ids: list[str] | None = None, include_passed: bool = False,
+                     only_cases: set[tuple[str, str]] | None = None, app_log: bool = True) -> tuple[Path, str]:
+    """Pack the issue log into a ZIP. run_ids None means every run on this device, or with
+    only_cases, every run of those (suite id, case id) test cases. app_log=False leaves out the
+    studio's own log, which covers every user's activity.
 
     Returns the temporary ZIP and the file name to download it as.
     """
@@ -628,15 +631,18 @@ def export_issue_log(run_ids: list[str] | None = None, include_passed: bool = Fa
         chosen = [r for r in all_runs if r["id"] in run_ids]
         scope = "run " + ", ".join(run_ids)
     else:
-        chosen = [r for r in all_runs if include_passed or r["status"] != "passed"]
+        chosen = [r for r in all_runs if (include_passed or r["status"] != "passed")
+                  and (only_cases is None or (r["suite_id"], r["case_id"]) in only_cases)]
         scope = "all runs on this device" if include_passed else "every run on this device that did not pass"
+        if only_cases is not None:
+            scope += " (your test cases)"
     runs = [storage.load_run(r["id"]) for r in chosen]
     runs = [r for r in runs if r]
     if run_ids is not None:
         keys = {(r["suite_id"], r["case_id"]) for r in runs}
         session_docs = list_session_logs(keys)
     else:
-        session_docs = list_session_logs()
+        session_docs = list_session_logs(only_cases)
         keys = {(r["suite_id"], r["case_id"]) for r in runs} | {
             (d.get("suite_id"), d.get("case_id")) for _, d in session_docs}
 
@@ -686,7 +692,7 @@ def export_issue_log(run_ids: list[str] | None = None, include_passed: bool = Fa
                                                     indent=1, ensure_ascii=False, default=str))
             text(f"sessions/{path.stem}.txt", _session_log_text(doc))
 
-        for f in sorted(LOGS_DIR.glob("app.log*")) if LOGS_DIR.exists() else []:
+        for f in sorted(LOGS_DIR.glob("app.log*")) if app_log and LOGS_DIR.exists() else []:
             put(f.name, f)
         text("environment.json", json.dumps(environment(), indent=1))
         xlsx = tmp / "issues.xlsx"

@@ -4,3 +4,6 @@ __pycache__/
 **/__pycache__/
 *.pyc
 .git/
+.env
+.impeccable/
+issue_log/

@@ -162,7 +162,7 @@ def record_session(session: Session, suite: dict, case: dict, start_url: str | N
     warnings = _review(rec_steps, steps, linked, freeform)
     recording = {
         "suite_id": suite["id"], "case_id": case["id"], "recorded_at": storage.now_iso(),
-        "start_url": start_url, "status": status, "linked_parameters": linked,
+        "recorded_by": session.user, "start_url": start_url, "status": status, "linked_parameters": linked,
         "warnings": warnings, "steps": rec_steps,
     }
     storage.save_recording(suite["id"], case["id"], recording)

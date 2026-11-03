@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · Automation Studio</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body class="login-page">
+  <form class="card login-card" id="login-form" autocomplete="on">
+    <div class="login-brand">
+      <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path fill="currentColor" d="M12 2a10 10 0 1 0 10 10h-2a8 8 0 1 1-2.34-5.66L15 9h7V2l-2.93 2.93A9.97 9.97 0 0 0 12 2Zm-1 6v5l4 2.5.9-1.5-2.9-1.8V8h-2Z"/></svg>
+      <span>Automation Studio</span>
+    </div>
+    <p class="muted">Sign in with the username and password you were given. What you upload, record, run and delete is logged under your name.</p>
+    <label for="username">Username</label>
+    <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+    <div class="err-text" id="login-error" role="alert"></div>
+    <button class="btn primary" id="login-btn" type="submit">Sign in</button>
+  </form>
+  <script src="/static/login.js"></script>
+</body>
+</html>

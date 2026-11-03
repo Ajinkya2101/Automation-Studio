@@ -1,0 +1,51 @@
+# Automation Studio on a server, for several users.
+#
+#   cp .env.example .env              then edit it
+#   docker compose up -d --build      the studio alone, on 127.0.0.1:8010 of the server
+#   docker compose --profile https up -d --build
+#                                     plus Caddy, serving it over HTTPS on STUDIO_DOMAIN
+#
+# Only data/ is mounted: recordings, runs, saved sign-ins, users.json and the logs
+# (including logs/audit.jsonl). Back that folder up. The code comes from the image,
+# so rebuild after an update.
+services:
+  studio:
+    build: .
+    image: automation-studio:latest
+    restart: unless-stopped
+    shm_size: 1g
+    ports:
+      # Keep this on 127.0.0.1 when Caddy (or another proxy) serves the studio.
+      - "${STUDIO_PUBLISH:-127.0.0.1:8010}:8010"
+    volumes:
+      - ./data:/app/data
+    environment:
+      TZ: ${TZ:-UTC}
+      STUDIO_DEVICE_NAME: ${STUDIO_DEVICE_NAME:-studio-server}
+      STUDIO_OS_USER: ${STUDIO_OS_USER:-server}
+      STUDIO_SECRET_KEY: ${STUDIO_SECRET_KEY:-}
+      STUDIO_SESSION_HOURS: ${STUDIO_SESSION_HOURS:-12}
+      STUDIO_SLOW_FACTOR: ${STUDIO_SLOW_FACTOR:-1}
+      STUDIO_TRACE: ${STUDIO_TRACE:-failures}
+      # Believe X-Forwarded-For / -Proto from the proxy, so the audit log has the user's IP
+      # and the sign-in cookie is marked Secure. Safe while the port above is 127.0.0.1 only.
+      STUDIO_TRUSTED_PROXIES: ${STUDIO_TRUSTED_PROXIES:-*}
+
+  caddy:
+    image: caddy:2.8.4
+    profiles: ["https"]
+    restart: unless-stopped
+    depends_on: [studio]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      STUDIO_DOMAIN: ${STUDIO_DOMAIN:-}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  caddy-data:
+  caddy-config:

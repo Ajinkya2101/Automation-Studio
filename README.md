@@ -21,9 +21,15 @@ Double-click **`start_container.bat`**. It will:
 
 Other commands: `start_container.bat build | open | shell | stop | remove | logs | status`.
 
+The dashboard asks for a username and password. On the first start the studio creates
+ten users, `user01` to `user10`, and writes their passwords to `data/initial_passwords.txt`.
+Hand them out, then delete that file (see **Users** below).
+
 The container runs the dashboard and a real Chromium on a virtual screen. While you
-sign in, record or run, the dashboard shows that browser live (noVNC on port 6080).
-Click inside the view to type into it. Both ports are published on `localhost` only.
+sign in, record or run, the dashboard shows that browser live (noVNC, served by the
+studio under `/vnc/` behind the same sign-in). Click inside the view to type into it.
+`start_container.bat` publishes the port on `localhost` only. To serve several people,
+see **Deploy for several users**.
 
 The project folder is mounted into the container, so recordings, runs and the saved
 browser sign-ins live in `data/` on your machine and survive container rebuilds.
@@ -59,6 +65,76 @@ browser sign-ins live in `data/` on your machine and survive container rebuilds.
 
 If Microsoft ends the session (password change, policy, long inactivity), step 1 fails with
 a sign-in page in its screenshot. Click **Sign in again** and rerun.
+
+## Deploy for several users
+
+Use `docker-compose.yml` on a Linux server (or any Docker host) instead of `start_container.bat`.
+The image carries the code; only `data/` is mounted.
+
+```
+cp .env.example .env                          # set STUDIO_DOMAIN, TZ, ...
+docker compose --profile https up -d --build  # studio + Caddy (HTTPS on 443)
+docker compose logs studio                    # first start: "Created 10 dashboard users"
+cat data/initial_passwords.txt                # hand out, then: rm data/initial_passwords.txt
+```
+
+- **HTTPS.** Caddy gets a certificate for `STUDIO_DOMAIN` by itself when that name has public DNS.
+  For an internal name, uncomment `tls internal` in `deploy/Caddyfile` (or use your company's
+  certificate). Without the `https` profile the studio listens on `127.0.0.1:8010` only; put your own
+  proxy in front of it. Don't publish it on the network over plain HTTP: the sign-in and every
+  test's data would cross the network unencrypted.
+- **Firewall.** Open 80 and 443 only. VNC (5900) never leaves the container, and port 6080 is no
+  longer used.
+- **Backups.** Back up `data/`: test cases, recordings, runs, saved sign-ins, `users.json`,
+  `secret_key` and `logs/audit.jsonl`.
+- **Updates.** `git pull` then `docker compose --profile https up -d --build`. Wait until no
+  recording or run is in progress: a restart ends it.
+
+### Users
+
+Ten users (`user01`..`user10`) and an `admin` are created on the first start, each with a short
+password such as `mint27`. Manage them with
+`docker compose exec studio python -m app.users <command>` (or `.venv\Scripts\python -m app.users`
+without Docker):
+
+| Command | Does |
+|---|---|
+| `list` | Lists the users |
+| `add <name> [password]` | Adds a user (lowercase letters, digits, `.`, `_`, `-`); generates a password when none is given |
+| `add-admin <name> [password]` | Adds an admin |
+| `passwd <name> [password]` | Sets a new password. That user's open sessions end |
+| `remove <name>` | Removes a user. Their open sessions end |
+
+Only salted PBKDF2 hashes are stored (`data/users.json`). A sign-in lasts 12 hours
+(`STUDIO_SESSION_HOURS`). Five wrong passwords for one username lock it for 15 minutes.
+Signing out ends the session on the server too, so a copied cookie stops working.
+
+### Admin screen
+
+An admin also has **Admin** in the top bar: every test case by everyone with who created and recorded
+it, its runs, its last run and its status (not recorded, recorded, passed, failed, stopped), with
+filters by creator, status and text; and a table of what each user has created, recorded and run, and
+when they were last active. Click a test case to open it.
+
+### Who sees what
+
+Each test case belongs to the user who uploaded or created it. A user sees, opens, records, runs,
+deletes and exports only their own test cases, with their runs, screenshots and live logs; other users'
+test cases are not shown at all. An admin sees and can act on everyone's. Test cases created before
+sign-ins existed have no owner, so only an admin sees them.
+
+### Who did what
+
+Every test case shows who uploaded or created it, the recording shows who recorded it, and
+*Run history* shows who started each run (and who stopped it, if someone did). **Activity** in the top
+bar lists every sign-in, failed sign-in, upload, new test, sign-in session, recording, run, stop,
+deletion and issue-log export with the user, time and IP address, newest first. It is read from
+`data/logs/audit.jsonl`, which is only appended to. Changed run data is listed by name only, never
+by value.
+A user's Activity shows their own entries; an admin's shows everyone's.
+
+Only one sign-in, recording or run can use the browser at a time, for all users together. While
+someone else's session runs, the status pill names them (not their test) and the buttons wait.
 
 ## Run without Docker (development)
 
@@ -123,7 +199,11 @@ Test data tokens: `{now}` (2026-09-25 14:32:10), `{date}`, `{time}`, `{stamp}` (
 
 ## Tests
 
+The tests other than `auth_test.py` drive the API without signing in (`STUDIO_LOGIN=off`, which the
+studio only accepts while it listens on 127.0.0.1).
+
 ```
+.venv\Scripts\python tests\auth_test.py          # sign-in, lockout, audit log, refused requests, live view relay
 .venv\Scripts\python tests\smoke_test.py         # upload, record, run, changed data, failure
 .venv\Scripts\python tests\rich_editor_test.py   # Outlook-style editors, recipient Enter, {now} subjects
 .venv\Scripts\python tests\freeform_test.py      # record without Excel: steps, test data, Excel script, runs
@@ -139,8 +219,14 @@ is the small multi-page site the smoke and free-form tests record against.
 
 ## Prototype limits
 
-- One sign-in, recording or run at a time; single user; no login on the dashboard.
-- The live view has no password, so it is bound to localhost only.
+- One sign-in, recording or run at a time, shared by all users.
+- One saved sign-in per site, shared by all users: everyone's recordings and runs act in the
+  application under test as whoever clicked **Save sign-in**. Use a test account there, not a person's
+  own account.
+- Users are trusted with what the browser can reach: a test can open any http(s) address the server
+  can, including internal ones.
+- Users are local to the studio (no single sign-on). A user can act only on their own test cases;
+  an admin on everyone's (the Activity log records who did what).
 - Recording against Outlook depends on Microsoft's current page structure. If a run
   fails after an Outlook update, re-record that test.
 - If a password is typed during recording and is not in the Excel test data, it is

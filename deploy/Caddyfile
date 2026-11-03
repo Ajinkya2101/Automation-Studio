@@ -1,0 +1,18 @@
+# HTTPS in front of the studio (docker compose --profile https).
+#
+# STUDIO_DOMAIN with public DNS: Caddy gets a Let's Encrypt certificate by itself.
+# Internal name only (e.g. studio.corp.local): uncomment "tls internal" and install
+# Caddy's root certificate on the users' PCs, or use "tls cert.pem key.pem" with your
+# company's certificate (mount the files into the caddy container).
+{$STUDIO_DOMAIN} {
+	# tls internal
+
+	# Run logs stream over Server-Sent Events and the live view is a WebSocket:
+	# reverse_proxy passes both through as they are.
+	reverse_proxy studio:8010
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+}

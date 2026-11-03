@@ -1,5 +1,6 @@
 """File-based storage: uploaded suites, recordings and runs live under data/."""
 import json
+import re
 import secrets
 import shutil
 from datetime import datetime
@@ -9,6 +10,11 @@ from .config import DATA_DIR
 
 SUITES = DATA_DIR / "suites"
 RUNS = DATA_DIR / "runs"
+
+# IDs end up in file names (suite and run folders, recordings/<case id>.json), so they must
+# not be able to reach outside data/. Suite and run IDs are made by new_id(); case IDs come
+# from the uploaded Excel, so only what could change the folder is refused there.
+SAFE_ID = re.compile(r"^[a-z]+-\d{8}-\d{6}-[0-9a-f]{4}$")
 
 
 def new_id(prefix: str) -> str:
@@ -29,6 +35,15 @@ def _write(path: Path, obj) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
     tmp.replace(path)
+
+
+def safe_id(value: str) -> bool:
+    return bool(SAFE_ID.match(value or ""))
+
+
+def safe_name(value: str) -> bool:
+    return (bool(value) and len(value) <= 120 and not value.startswith(".")
+            and not any(c in value for c in '/\\:*?"<>|\0'))
 
 
 # ---- suites (one uploaded workbook = one suite, each sheet = one test case)
@@ -75,6 +90,8 @@ def delete_case(suite: dict, case_id: str) -> None:
 
 # ---- recordings
 def recording_path(suite_id: str, case_id: str) -> Path:
+    if not (safe_id(suite_id) and safe_name(case_id)):
+        raise ValueError(f"Unsafe test case id: {case_id!r}")
     return suite_dir(suite_id) / "recordings" / f"{case_id}.json"
 
 

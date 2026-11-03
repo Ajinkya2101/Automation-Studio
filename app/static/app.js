@@ -7,6 +7,7 @@ const secs = ms => ms == null ? '' : `${(ms / 1000).toFixed(1)}s`;
 
 async function api(path, opts = {}) {
   const res = await fetch(path, opts);
+  if (res.status === 401) { location.href = '/login'; throw new Error('Signed out'); }
   const type = res.headers.get('content-type') || '';
   const body = type.includes('json') ? await res.json() : await res.text();
   if (!res.ok) throw new Error((body && body.detail) || body || res.statusText);
@@ -24,6 +25,11 @@ const S = {
   session: null,    // active session info
   es: null,         // EventSource
   live: null,       // live / viewed run model
+  user: null,       // signed-in user
+  other: null,      // a session someone else started (only one browser session at a time)
+  activity: null,   // audit entries while the Activity view is open
+  admin: null,      // admin overview while the Admin view is open
+  adminFilter: { user: '', status: '', q: '' },
 };
 
 // ------------------------------------------------------------------ data
@@ -34,6 +40,8 @@ async function loadCases() {
 
 async function selectCase(suite_id, case_id, keepLive = false) {
   S.newForm = false;
+  S.activity = null;
+  S.admin = null;
   S.sel = { suite_id, case_id };
   S.detail = await api(`/api/suites/${suite_id}/cases/${encodeURIComponent(case_id)}`);
   S.runForm = false;
@@ -49,8 +57,10 @@ async function refresh() {
 
 // ------------------------------------------------------------------ record without Excel
 function showNewForm() {
-  if (S.session) return;
+  if (S.session || S.other) return;
   S.newForm = true;
+  S.activity = null;
+  S.admin = null;
   S.sel = null;
   S.detail = null;
   S.live = null;
@@ -203,12 +213,29 @@ function attach(session) {
 
 function setStatus() {
   const pill = $('#status-pill');
-  const s = S.session;
+  const s = S.session || S.other;
+  const by = s && s.user && s.user !== S.user ? ` · ${esc(s.user)}` : '';
+  const cid = s && s.case_id ? ` ${esc(s.case_id)}` : '';  // not shown for another user's test
   if (!s) { pill.className = 'pill idle'; pill.textContent = 'Idle'; }
-  else if (s.kind === 'signin') { pill.className = 'pill signin'; pill.innerHTML = `<span class="blink"></span>Signing in`; }
-  else if (s.kind === 'record') { pill.className = 'pill record'; pill.innerHTML = `<span class="blink"></span>Recording ${esc(s.case_id)}`; }
-  else { pill.className = 'pill run'; pill.innerHTML = `<span class="blink"></span>Running ${esc(s.case_id)}`; }
+  else if (s.kind === 'signin') { pill.className = 'pill signin'; pill.innerHTML = `<span class="blink"></span>Signing in${by}`; }
+  else if (s.kind === 'record') { pill.className = 'pill record'; pill.innerHTML = `<span class="blink"></span>Recording${cid}${by}`; }
+  else { pill.className = 'pill run'; pill.innerHTML = `<span class="blink"></span>Running${cid}${by}`; }
+  pill.title = S.other ? `Started by ${S.other.user || 'someone else'}. Only one sign-in, recording or run can use the browser at a time.` : '';
   document.querySelectorAll('[data-needs-idle]').forEach(b => { b.disabled = !!s; });
+}
+
+// Someone else may start a session from their own dashboard: check every few seconds,
+// so buttons wait and the pill says who is using the browser.
+async function pollStatus() {
+  if (S.session) return;
+  const { active } = await api('/api/status').catch(() => ({ active: S.other }));
+  const was = S.other && S.other.id;
+  S.other = active;
+  if ((active && active.id) !== was) {
+    setStatus();
+    if (!active) await refresh().catch(() => {});  // their recording or run may have changed what is shown
+    else if (!S.activity && !S.admin) renderMain();
+  }
 }
 
 // Live browser view: the automated browser runs on the container's virtual
@@ -284,7 +311,7 @@ function renderCaseList() {
     return `<li class="${on ? 'on' : ''}" data-suite="${esc(c.suite_id)}" data-case="${esc(c.case_id)}">
       <div class="cid"><span>${esc(c.case_id)}</span>${badge}</div>
       <div class="ctitle">${esc(c.title)}</div>
-      <div class="cfile">${esc(c.filename)} · ${c.steps} steps</div></li>`;
+      <div class="cfile">${esc(c.filename)} · ${c.steps} steps${c.created_by ? ` · ${esc(c.created_by)}` : ''}</div></li>`;
   }).join('');
   ul.querySelectorAll('li[data-suite]').forEach(li => li.onclick = () => selectCase(li.dataset.suite, li.dataset.case));
 }
@@ -293,6 +320,8 @@ function renderCaseList() {
 function renderMain() {
   const main = $('#main');
   const notice = S.notice ? `<div class="notice ${S.notice.kind}">${S.notice.html}</div>` : '';
+  if (S.admin) { renderAdmin(main); return; }
+  if (S.activity) { renderActivity(main); return; }
   if (S.newForm) { renderNewForm(main, notice); return; }
   if (!S.detail) {
     main.innerHTML = `${notice}<div class="hero">
@@ -307,7 +336,7 @@ function renderMain() {
     return;
   }
   const { case: c, suite, recording, runs, target } = S.detail;
-  const busy = !!S.session;
+  const busy = !!(S.session || S.other);
   const recorded = !!recording;
   const hasTarget = !!target.url;
   const signedIn = target.has_profile;
@@ -321,7 +350,7 @@ function renderMain() {
     <div class="case-head">
       <div>
         <div class="eyebrow">${freeform ? `Recorded without Excel · created ${esc(fmtDate(suite.uploaded_at))}`
-          : `${esc(suite.filename)} · uploaded ${esc(fmtDate(suite.uploaded_at))}`}</div>
+          : `${esc(suite.filename)} · uploaded ${esc(fmtDate(suite.uploaded_at))}`}${suite.created_by ? ` by ${esc(suite.created_by)}` : ''}</div>
         <h1>${esc(c.id)} · ${esc(c.title)}</h1>
         ${c.description ? `<p>${esc(c.description)}</p>` : ''}
         <div class="target">Application under test: ${hasTarget
@@ -338,7 +367,7 @@ function renderMain() {
     <div class="flow">
       ${firstChip}<span class="arrow">→</span>
       ${stepChip(2, signedIn, 'Signed in to the application', 'Sign in once (if the application needs it)')}<span class="arrow">→</span>
-      ${stepChip(3, recorded, `Recorded ${esc(fmtDate(recording && recording.recorded_at))}`, 'Record the steps once')}<span class="arrow">→</span>
+      ${stepChip(3, recorded, `Recorded ${esc(fmtDate(recording && recording.recorded_at))}${recording && recording.recorded_by ? ` by ${esc(recording.recorded_by)}` : ''}`, 'Record the steps once')}<span class="arrow">→</span>
       ${stepChip(4, runs.length, `${runs.length} automated run(s)`, 'Run automatically')}
     </div>
     <div id="run-form-slot"></div>
@@ -396,7 +425,7 @@ function renderTab() {
       ? `<div class="notice warn" style="margin:12px 16px 0"><b>Check this recording before relying on it:</b><ul>${recording.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul></div>`
       : '';
     body.innerHTML = `<div class="card">${warn}
-      <div class="rec-step faint">Recorded ${esc(fmtDate(recording.recorded_at))} · ${countActions(recording)} actions ·
+      <div class="rec-step faint">Recorded ${esc(fmtDate(recording.recorded_at))}${recording.recorded_by ? ` by ${esc(recording.recorded_by)}` : ''} · ${countActions(recording)} actions ·
         ${c.freeform
           ? `${recording.linked_parameters} typed value(s) saved as test data <span class="param">\${…}</span>, so you can change them in the run form.`
           : `${recording.linked_parameters} value(s) linked to Excel test data <span class="param">\${…}</span>, so changing the Excel data changes what the automation types.`}</div>
@@ -410,11 +439,12 @@ function renderTab() {
       return;
     }
     body.innerHTML = `<div class="card"><table class="grid">
-      <thead><tr><th>Run</th><th>Started</th><th>Result</th><th>Steps</th><th>Duration</th><th></th></tr></thead>
+      <thead><tr><th>Run</th><th>Started</th><th>By</th><th>Result</th><th>Steps</th><th>Duration</th><th></th></tr></thead>
       <tbody>${runs.map(r => `<tr>
         <td class="mono">${esc(r.id)}</td>
         <td>${esc(fmtDate(r.started_at))}</td>
-        <td><span class="badge ${r.status}">${r.status}</span></td>
+        <td>${esc(r.run_by || '–')}</td>
+        <td><span class="badge ${r.status}">${r.status}</span>${r.stopped_by ? ` <span class="by">by ${esc(r.stopped_by)}</span>` : ''}</td>
         <td>${r.passed ?? 0} passed · ${r.failed ?? 0} failed · ${r.skipped ?? 0} skipped</td>
         <td>${secs(r.duration_ms)}</td>
         <td style="text-align:right;white-space:nowrap">
@@ -587,6 +617,150 @@ async function viewRun(runId) {
   $('#live').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
+// ------------------------------------------------------------------ activity (audit log)
+const ACTIONS = {
+  login: 'Signed in', logout: 'Signed out', login_failed: 'Wrong password', login_locked: 'Locked out',
+  upload: 'Uploaded Excel', create_test: 'Created test', delete_case: 'Deleted test case',
+  signin_start: 'Started sign-in', record_start: 'Started recording', run_start: 'Started run',
+  stop: 'Stopped', export_issue_log: 'Exported issue log',
+};
+
+async function showActivity() {
+  S.activity = await api('/api/audit?limit=1000');
+  S.admin = null;
+  S.newForm = false;
+  S.sel = null;
+  S.detail = null;
+  S.live = null;
+  renderCaseList();
+  renderMain();
+}
+
+function describeEntry(e) {
+  const parts = [];
+  if (e.case_id) parts.push(`<span class="mono">${esc(e.case_id)}</span>${e.title ? ` · ${esc(e.title)}` : ''}`);
+  if (e.file) parts.push(esc(e.file));
+  if (e.cases && e.cases.length) parts.push(`${e.cases.length} case(s): ${e.cases.map(esc).join(', ')}`);
+  if (e.run_id) parts.push(`run <span class="mono">${esc(e.run_id)}</span>`);
+  if (e.url) parts.push(`<span class="mono">${esc(e.url)}</span>`);
+  if (e.changed_data && e.changed_data.length) parts.push(`changed data: ${e.changed_data.map(esc).join(', ')}`);
+  if (e.started_by && e.started_by !== e.user) parts.push(`started by ${esc(e.started_by)}`);
+  if (e.replaces_recording_by) parts.push(`replaces the recording by ${esc(e.replaces_recording_by)}`);
+  if (e.created_by && e.action === 'delete_case') parts.push(`created by ${esc(e.created_by)}`);
+  if (e.scope === 'all') parts.push(e.include_passed ? 'all runs' : 'every run that did not pass');
+  return parts.join(' · ');
+}
+
+function renderActivity(main) {
+  const rows = S.activity;
+  main.innerHTML = `<div class="activity-head"><h1>${S.isAdmin ? 'Activity' : 'Your activity'}</h1>
+      <span class="muted">${S.isAdmin ? 'Who changed what' : 'What you did'}, newest first · <button class="btn small" id="act-refresh">Refresh</button></span></div>
+    ${rows.length ? `<div class="card"><table class="grid">
+      <thead><tr><th>When</th><th>User</th><th>Action</th><th>Details</th><th>From</th></tr></thead>
+      <tbody>${rows.map(e => `<tr>
+        <td class="when">${esc(fmtDate(e.ts))}</td>
+        <td>${esc(e.user || '–')}</td>
+        <td class="act-name ${/failed|locked/.test(e.action) ? 'bad' : ''}">${esc(ACTIONS[e.action] || e.action)}</td>
+        <td>${describeEntry(e)}</td>
+        <td class="mono faint">${esc(e.ip || '')}</td></tr>`).join('')}</tbody></table></div>`
+      : '<div class="card empty-box">Nothing yet.</div>'}`;
+  $('#act-refresh').onclick = showActivity;
+}
+
+// ------------------------------------------------------------------ admin overview
+const STATUS_LABEL = { new: 'not recorded', recorded: 'recorded, not run', passed: 'passed', failed: 'failed', stopped: 'stopped', running: 'running' };
+
+async function showAdmin() {
+  S.admin = await api('/api/admin/overview');
+  S.activity = null;
+  S.newForm = false;
+  S.sel = null;
+  S.detail = null;
+  S.live = null;
+  renderCaseList();
+  renderMain();
+}
+
+function renderAdmin(main) {
+  const { tests, users, active } = S.admin;
+  const F = S.adminFilter;
+  const count = st => tests.filter(t => t.status === st).length;
+  const tiles = [
+    ['Test cases', tests.length, ''],
+    ['Recorded', tests.filter(t => t.recorded_by || t.status !== 'new').length, ''],
+    ['Last run passed', count('passed'), 'passed'],
+    ['Last run failed', count('failed'), 'failed'],
+    ['Not recorded yet', count('new'), ''],
+    ['Runs in total', tests.reduce((n, t) => n + t.runs, 0), ''],
+  ];
+  const creators = [...new Set(tests.map(t => t.created_by || ''))].sort();
+  main.innerHTML = `<div class="activity-head"><h1>Admin overview</h1>
+      <span class="muted">${active ? `Now: <b>${esc(active.kind)}</b> of <span class="mono">${esc(active.case_id)}</span> by ${esc(active.user || '–')} · ` : ''}<button class="btn small" id="adm-refresh">Refresh</button></span></div>
+    <div class="stat-row">${tiles.map(([label, n, cls]) => `<div class="card stat ${cls}"><b>${n}</b><span>${label}</span></div>`).join('')}</div>
+    <h2 class="adm-h">People</h2>
+    <div class="card"><table class="grid">
+      <thead><tr><th>User</th><th>Role</th><th>Test cases created</th><th>Recordings</th><th>Runs started</th><th>Last active</th></tr></thead>
+      <tbody>${users.map(u => `<tr>
+        <td><button class="link-btn" data-user="${esc(u.user)}" title="Show the test cases ${esc(u.user)} created">${esc(u.user)}</button></td>
+        <td>${u.role === 'admin' ? '<span class="badge recorded">admin</span>' : 'user'}</td>
+        <td>${u.tests}</td><td>${u.recordings}</td><td>${u.runs}</td>
+        <td class="when">${u.last_seen ? esc(fmtDate(u.last_seen)) : '<span class="faint">never</span>'}</td></tr>`).join('')}</tbody></table></div>
+    <h2 class="adm-h">All test cases</h2>
+    <div class="adm-filters">
+      <label>Created by <select id="af-user"><option value="">Everyone</option>${creators.map(c => `<option value="${esc(c)}">${c ? esc(c) : '(before sign-in)'}</option>`).join('')}</select></label>
+      <label>Status <select id="af-status"><option value="">Any</option>${Object.entries(STATUS_LABEL).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select></label>
+      <input id="af-q" type="search" placeholder="Search ID, title or file" value="${esc(F.q)}">
+      <span class="faint" id="af-count"></span>
+    </div>
+    <div class="card"><table class="grid adm-tests">
+      <thead><tr><th>Test case</th><th>Created</th><th>Recorded</th><th>Runs</th><th>Last run</th><th>Status</th></tr></thead>
+      <tbody id="af-body"></tbody></table></div>`;
+  $('#af-user').value = F.user;
+  $('#af-status').value = F.status;
+  $('#adm-refresh').onclick = showAdmin;
+  $('#af-user').onchange = e => { F.user = e.target.value; renderAdminTests(); };
+  $('#af-status').onchange = e => { F.status = e.target.value; renderAdminTests(); };
+  $('#af-q').oninput = e => { F.q = e.target.value; renderAdminTests(); };
+  main.querySelectorAll('[data-user]').forEach(b => b.onclick = () => {
+    F.user = b.dataset.user; $('#af-user').value = F.user; renderAdminTests();
+    $('#af-body').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  renderAdminTests();
+}
+
+function renderAdminTests() {
+  const F = S.adminFilter;
+  const q = F.q.trim().toLowerCase();
+  const rows = S.admin.tests.filter(t => (!F.user || (t.created_by || '') === F.user) && (!F.status || t.status === F.status)
+    && (!q || `${t.case_id} ${t.title} ${t.filename}`.toLowerCase().includes(q)));
+  $('#af-count').textContent = `${rows.length} of ${S.admin.tests.length}`;
+  const body = $('#af-body');
+  body.innerHTML = rows.length ? rows.map(t => `<tr class="clickable" data-open="${esc(t.suite_id)}|${esc(t.case_id)}">
+      <td><b class="mono">${esc(t.case_id)}</b><div>${esc(t.title)}</div>
+        <div class="faint">${t.source === 'recording' ? 'Recorded without Excel' : esc(t.filename)} · ${t.steps} steps</div></td>
+      <td>${t.created_by ? esc(t.created_by) : '<span class="faint">before sign-in</span>'}<div class="faint">${esc(fmtDate(t.created_at))}</div></td>
+      <td>${t.recorded_at ? `${esc(t.recorded_by || '–')}<div class="faint">${esc(fmtDate(t.recorded_at))}${t.recording_warnings ? ` · ${t.recording_warnings} warning(s)` : ''}</div>` : '<span class="faint">–</span>'}</td>
+      <td>${t.runs ? `${t.runs}<div class="faint">${t.passed} passed · ${t.failed} failed</div>` : '<span class="faint">0</span>'}</td>
+      <td>${t.last_run ? `${esc(t.last_run.run_by || '–')}<div class="faint">${esc(fmtDate(t.last_run.started_at))} · ${secs(t.last_run.duration_ms)}</div>` : '<span class="faint">–</span>'}</td>
+      <td><span class="badge ${esc(t.status)}">${esc(STATUS_LABEL[t.status] || t.status)}</span></td></tr>`).join('')
+    : '<tr><td colspan="6" class="empty-box">No test cases match.</td></tr>';
+  body.querySelectorAll('[data-open]').forEach(tr => tr.onclick = () => {
+    const [suite, kase] = tr.dataset.open.split('|');
+    selectCase(suite, kase);
+  });
+}
+
+async function logout() {
+  $('#btn-logout').disabled = true;
+  if (S.es) S.es.close();
+  await fetch('/api/logout', { method: 'POST' }).catch(() => {});
+  location.replace('/login');  // replace: Back does not return to the dashboard
+}
+
+// A page restored from the browser's back/forward cache would show what it showed before
+// signing out; load it again, which asks the server (and goes to the sign-in page if needed).
+window.addEventListener('pageshow', e => { if (e.persisted) location.reload(); });
+
 function openLightbox(src) {
   const lb = $('#lightbox');
   $('img', lb).src = src;
@@ -608,10 +782,26 @@ window.addEventListener('unhandledrejection', e => reportError(e.reason && e.rea
 (async function init() {
   setupUpload();
   $('#btn-new-rec').onclick = showNewForm;
+  $('#btn-activity').onclick = showActivity;
+  $('#btn-admin').onclick = showAdmin;
+  $('#btn-logout').onclick = logout;
+  const me = await api('/api/me');
+  S.user = me.user;
+  S.isAdmin = me.admin;
+  if (me.login) { $('#who-name').textContent = me.user; $('#who').hidden = false; }
+  if (me.admin && me.login) $('#btn-admin').hidden = false;
   S.config = await api('/api/config').catch(() => S.config);
   await loadCases();
   const { active } = await api('/api/status');
-  if (active) {
+  setInterval(pollStatus, 4000);
+  if (active && active.user && active.user !== S.user) {
+    // Someone else's session: show it as busy rather than taking over its live log.
+    S.other = active;
+    setStatus();
+    if (active.suite_id) await selectCase(active.suite_id, active.case_id);  // admin: it may be anyone's test
+    else if (S.cases.length) await selectCase(S.cases[0].suite_id, S.cases[0].case_id);
+    else renderMain();
+  } else if (active) {
     await selectCase(active.suite_id, active.case_id);
     attach(active);
   } else if (S.cases.length) {

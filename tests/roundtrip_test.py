@@ -20,6 +20,8 @@ sys.path.insert(0, str(ROOT))
 sys.stdout.reconfigure(encoding="utf-8")
 # Keep uploads out of the studio's real data folder, and failures quick.
 os.environ.setdefault("STUDIO_DATA_DIR", tempfile.mkdtemp(prefix="studio-roundtrip-"))
+# These tests drive the API without signing in (allowed only on 127.0.0.1).
+os.environ.setdefault("STUDIO_LOGIN", "off")
 os.environ.setdefault("STUDIO_ACTION_TIMEOUT_MS", "6000")
 
 from playwright.sync_api import sync_playwright  # noqa: E402

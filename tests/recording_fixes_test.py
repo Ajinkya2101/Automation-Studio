@@ -27,6 +27,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.stdout.reconfigure(encoding="utf-8")
 os.environ.setdefault("STUDIO_DATA_DIR", tempfile.mkdtemp(prefix="studio-fixes-"))
+# These tests drive the API without signing in (allowed only on 127.0.0.1).
+os.environ.setdefault("STUDIO_LOGIN", "off")
 os.environ.setdefault("STUDIO_SLOW_FACTOR", "0.5")
 os.environ.setdefault("STUDIO_ACTION_TIMEOUT_MS", "12000")
 os.environ["STUDIO_TRACE"] = "always"

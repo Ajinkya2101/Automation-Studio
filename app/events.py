@@ -64,17 +64,19 @@ class Session:
     suite_id: str
     case_id: str
     run_id: str | None = None
+    user: str = ""  # who started it
     id: str = field(default_factory=lambda: secrets.token_hex(6))
     status: str = "running"  # running, completed, failed, stopped
     log: EventLog = field(default_factory=EventLog)
     stop_event: threading.Event = field(default_factory=threading.Event)
     started_at: float = field(default_factory=time.time)
     error: str | None = None  # traceback when the session crashed
+    stopped_by: str | None = None
 
     def info(self) -> dict:
         return {"id": self.id, "kind": self.kind, "suite_id": self.suite_id,
                 "case_id": self.case_id, "run_id": self.run_id, "status": self.status,
-                "started_at": self.started_at}
+                "started_at": self.started_at, "user": self.user, "stopped_by": self.stopped_by}
 
 
 class BusyError(RuntimeError):
@@ -97,18 +99,19 @@ class SessionManager:
         return self._sessions.get(sid)
 
     def start(self, kind: str, target: Callable, *, suite_id: str, case_id: str,
-              run_id: str | None = None, **kwargs) -> Session:
+              run_id: str | None = None, user: str = "", **kwargs) -> Session:
         with self._lock:
             if self.active():
                 a = self._active
-                raise BusyError(f"A {a.kind} session is already in progress for {a.case_id}.")
-            s = Session(kind=kind, suite_id=suite_id, case_id=case_id, run_id=run_id)
+                raise BusyError(f"A {a.kind} session is already in progress for {a.case_id}"
+                                f"{f', started by {a.user}' if a.user else ''}.")
+            s = Session(kind=kind, suite_id=suite_id, case_id=case_id, run_id=run_id, user=user)
             self._sessions[s.id] = s
             self._active = s
 
         def runner():
-            app_log.info("%s session %s started for %s/%s%s", kind, s.id, suite_id, case_id,
-                         f" (run {run_id})" if run_id else "")
+            app_log.info("%s session %s started for %s/%s%s by %s", kind, s.id, suite_id, case_id,
+                         f" (run {run_id})" if run_id else "", user or "-")
             try:
                 result = target(s, **kwargs)
                 if s.status == "running":

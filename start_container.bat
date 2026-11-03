@@ -22,10 +22,10 @@ REM -------- SETTINGS --------
 set "IMAGE=automation-studio:latest"
 set "CONTAINER_NAME=automation-studio"
 set "HOST_PORT=8010"
-set "VNC_PORT=6080"
 set "WORKDIR=/app"
 set "DASHBOARD_URL=http://localhost:%HOST_PORT%"
-set "LIVE_VIEW_URL=http://localhost:%VNC_PORT%/vnc.html?autoconnect=true&resize=scale&reconnect=true"
+REM The live view is served by the studio itself, behind its sign-in.
+set "LIVE_VIEW_URL=/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=vnc/websockify"
 
 REM Run from the directory this .bat lives in, regardless of where it's invoked from.
 cd /d "%~dp0"
@@ -62,7 +62,7 @@ echo    image      : %IMAGE%
 echo    container  : %CONTAINER_NAME%
 echo    mount      : %DOCKER_PATH%  ^-^>  %WORKDIR%
 echo    dashboard  : %DASHBOARD_URL%
-echo    live view  : http://localhost:%VNC_PORT%
+echo    sign-in    : see data\initial_passwords.txt after the first start
 echo ============================================================
 
 call :ensure_docker || goto :fail
@@ -133,8 +133,8 @@ set "TZ_POSIX=UTC"
 for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "$o=[TimeZoneInfo]::Local.GetUtcOffset([DateTime]::Now); $sign='-'; if ($o.Ticks -lt 0) { $sign='+' }; 'LOCAL{0}{1:00}:{2:00}' -f $sign, [Math]::Abs($o.Hours), [Math]::Abs($o.Minutes)"`) do set "TZ_POSIX=%%t"
 REM The PC's name and user label everything in the exported issue log; inside the
 REM container the host name is random.
-REM Ports are published on 127.0.0.1 only: the live view has no password, so
-REM it must not be reachable from other machines.
+REM The port is published on 127.0.0.1 only: this launcher is for one PC. To serve
+REM several users, use docker-compose.yml (see README, "Deploy for several users").
 docker run -d ^
     --name %CONTAINER_NAME% ^
     -e "STUDIO_LIVE_VIEW_URL=%LIVE_VIEW_URL%" ^
@@ -144,13 +144,12 @@ docker run -d ^
     -v "%DOCKER_PATH%:%WORKDIR%" ^
     -w %WORKDIR% ^
     -p 127.0.0.1:%HOST_PORT%:8010 ^
-    -p 127.0.0.1:%VNC_PORT%:6080 ^
     --shm-size=1g ^
     --restart unless-stopped ^
     %IMAGE% >NUL
 if errorlevel 1 (
-    echo [start_container] docker run failed. Is port %HOST_PORT% or %VNC_PORT% already in use?
-    echo Change HOST_PORT / VNC_PORT at the top of this file if another app needs them.
+    echo [start_container] docker run failed. Is port %HOST_PORT% already in use?
+    echo Change HOST_PORT at the top of this file if another app needs it.
     docker rm -f %CONTAINER_NAME% >NUL 2>&1
     exit /b 1
 )
@@ -197,6 +196,7 @@ exit /b 1
 echo.
 echo  Dashboard : %DASHBOARD_URL%
 echo  Live view : shown inside the dashboard while signing in, recording or running
+if exist "data\initial_passwords.txt" echo  Sign-ins  : data\initial_passwords.txt ^(hand them out, then delete the file^)
 echo.
 echo  Stop later with: start_container.bat stop    Logs: start_container.bat logs
 start "" "%DASHBOARD_URL%"

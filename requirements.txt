@@ -1,5 +1,7 @@
-fastapi>=0.110
-uvicorn>=0.29
-python-multipart>=0.0.9
-openpyxl>=3.1
-playwright>=1.49
+# Pinned so a server build gets the versions that were tested. Upgrade deliberately, then rerun the tests.
+fastapi==0.159.1
+uvicorn==0.54.0
+websockets==17.4
+python-multipart==0.0.32
+openpyxl==3.1.5
+playwright==1.64.0

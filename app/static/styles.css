@@ -21,6 +21,7 @@
   --mono: Consolas, "Cascadia Mono", ui-monospace, monospace;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; height: 100%; }
 body { font: 14px/1.5 "Segoe UI", system-ui, -apple-system, sans-serif; color: var(--ink); background: var(--bg); }
 a { color: var(--accent); text-decoration: none; }
@@ -70,6 +71,46 @@ main { padding: 24px 28px 60px; min-width: 0; max-width: 1280px; }
 .new-form .hint { font-size: 12.5px; color: var(--faint); margin-top: 6px; }
 .new-form .err-text { color: var(--fail); font-size: 13px; min-height: 18px; margin-top: 10px; }
 .new-form .foot { display: flex; gap: 10px; justify-content: flex-end; margin-top: 6px; }
+
+/* sign-in page */
+.login-page { display: grid; place-items: center; min-height: 100vh; padding: 16px; background: var(--navy); }
+.login-card { width: 100%; max-width: 380px; padding: 28px 28px 24px; display: flex; flex-direction: column; }
+.login-brand { display: flex; align-items: center; gap: 9px; font-weight: 700; font-size: 18px; color: var(--navy); }
+.login-card p { margin: 10px 0 8px; font-size: 13px; }
+.login-card label { font-weight: 600; font-size: 13px; color: var(--muted); margin: 12px 0 5px; }
+.login-card input { font: inherit; width: 100%; padding: 9px 11px; border: 1px solid #cdd6e1; border-radius: 8px; }
+.login-card input:focus { outline: 2px solid #c9dafc; border-color: var(--accent); }
+.login-card .err-text { color: var(--fail); font-size: 13px; min-height: 20px; margin: 10px 0 4px; }
+.login-card .btn { justify-content: center; padding-top: 9px; padding-bottom: 9px; }
+
+/* signed-in user and activity */
+.who { display: inline-flex; align-items: center; gap: 10px; color: #dbe6f5; }
+.who b { color: #fff; font-weight: 600; }
+.top-actions button.link { background: none; border: 0; padding: 0; color: #dbe6f5; cursor: pointer; }
+.top-actions button.link:hover { text-decoration: underline; }
+.by { color: var(--faint); }
+.activity-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.activity-head h1 { margin: 0; font-size: 21px; }
+.grid td.when { white-space: nowrap; color: var(--muted); }
+.grid td.act-name { white-space: nowrap; font-weight: 600; }
+.grid td.act-name.bad { color: var(--fail); }
+
+/* admin overview */
+.stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 22px; }
+.stat { padding: 14px 16px; display: flex; flex-direction: column; gap: 2px; }
+.stat b { font-size: 24px; line-height: 1.1; }
+.stat span { font-size: 12.5px; color: var(--muted); }
+.stat.passed b { color: var(--pass); }
+.stat.failed b { color: var(--fail); }
+.adm-h { font-size: 15px; margin: 22px 0 10px; }
+.adm-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-bottom: 10px; font-size: 13px; color: var(--muted); }
+.adm-filters label { display: inline-flex; align-items: center; gap: 7px; }
+.adm-filters select, .adm-filters input { font: inherit; padding: 6px 9px; border: 1px solid #cdd6e1; border-radius: 7px; background: #fff; color: var(--ink); }
+.adm-filters input { min-width: 240px; }
+.grid tr.clickable { cursor: pointer; }
+.grid tr.clickable:hover td { background: #f7f9fc; }
+.link-btn { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font-weight: 600; }
+.link-btn:hover { text-decoration: underline; }
 .script-link { margin: 0 0 10px; font-size: 13px; }
 
 .side-title { margin: 20px 4px 8px; font-size: 11px; font-weight: 700; letter-spacing: .7px; text-transform: uppercase; color: var(--faint); }

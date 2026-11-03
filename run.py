@@ -8,7 +8,7 @@ import webbrowser
 
 import uvicorn
 
-from app.config import BIND_HOST, IN_CONTAINER, PORT
+from app.config import BIND_HOST, IN_CONTAINER, PORT, TRUSTED_PROXIES
 
 
 def main() -> None:
@@ -20,7 +20,10 @@ def main() -> None:
     print("  Press Ctrl+C to stop.\n", flush=True)
     if "--no-browser" not in sys.argv and not IN_CONTAINER:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
-    uvicorn.run("app.main:app", host=BIND_HOST, port=PORT, log_level="warning")
+    # Behind a reverse proxy (HTTPS), take the client's address and https from its headers,
+    # so the audit log names the right IP and the sign-in cookie is marked Secure.
+    uvicorn.run("app.main:app", host=BIND_HOST, port=PORT, log_level="warning",
+                proxy_headers=True, forwarded_allow_ips=TRUSTED_PROXIES)
 
 
 if __name__ == "__main__":

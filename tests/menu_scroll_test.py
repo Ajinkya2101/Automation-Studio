@@ -22,6 +22,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.stdout.reconfigure(encoding="utf-8")
 os.environ.setdefault("STUDIO_DATA_DIR", tempfile.mkdtemp(prefix="studio-menu-"))
+# These tests drive the API without signing in (allowed only on 127.0.0.1).
+os.environ.setdefault("STUDIO_LOGIN", "off")
 
 import uvicorn  # noqa: E402
 from fastapi.responses import HTMLResponse  # noqa: E402

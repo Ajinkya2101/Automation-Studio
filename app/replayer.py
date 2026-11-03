@@ -783,7 +783,7 @@ def run_session(session: Session, suite: dict, case: dict, recording: dict,
     # environment and test_data (passwords masked) are for the issue log: which device, versions and values.
     run = {"id": run_id, "suite_id": suite["id"], "case_id": case["id"], "title": case["title"],
            "started_at": storage.now_iso(), "finished_at": None, "status": "running",
-           "headed": headed, "slow_mo": slow_mo, "data_overrides": sorted((data or {}).keys()),
+           "run_by": session.user, "headed": headed, "slow_mo": slow_mo, "data_overrides": sorted((data or {}).keys()),
            "recorded_at": recording.get("recorded_at"), "start_url": target_url,
            "environment": environment(), "test_data": shown_data,
            "steps": [{"step_id": s["step_id"], "name": names.get(s["step_id"], s["name"]),
@@ -830,6 +830,8 @@ def run_session(session: Session, suite: dict, case: dict, recording: dict,
 
     counts = {k: sum(1 for s in run["steps"] if s["status"] == k) for k in ("passed", "failed", "skipped")}
     run["status"] = "stopped" if stopped else ("failed" if failed else "passed")
+    if stopped and session.stopped_by:
+        run["stopped_by"] = session.stopped_by
     run["finished_at"] = storage.now_iso()
     run["duration_ms"] = int((time.time() - t_run) * 1000)
     run.update(counts)

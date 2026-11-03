@@ -37,3 +37,19 @@ OS_USER = os.environ.get("STUDIO_OS_USER", "")
 # Playwright trace of each run (open with `playwright show-trace trace.zip`):
 # "failures" keeps it for runs that did not pass, "always" for every run, "off" records none.
 TRACE = os.environ.get("STUDIO_TRACE", "failures").strip().lower()
+
+# Sign-in to the dashboard. Users and their password hashes are in data/users.json
+# (manage them with `python -m app.users`). "off" is only allowed on 127.0.0.1, for the tests.
+LOGIN = os.environ.get("STUDIO_LOGIN", "on").strip().lower() != "off"
+USERS_FILE = DATA_DIR / "users.json"
+SESSION_HOURS = float(os.environ.get("STUDIO_SESSION_HOURS", "12"))
+# Signs the login cookie. Set it for a fixed value; otherwise one is generated into data/secret_key.
+SECRET_KEY = os.environ.get("STUDIO_SECRET_KEY", "")
+# Reverse proxies whose X-Forwarded-For / -Proto headers are believed (comma separated, or "*").
+TRUSTED_PROXIES = os.environ.get("STUDIO_TRUSTED_PROXIES", "127.0.0.1")
+MAX_UPLOAD_MB = int(os.environ.get("STUDIO_MAX_UPLOAD_MB", "20"))
+
+# Live view: the app serves noVNC's page and relays its WebSocket to the VNC server inside the
+# container, so the live view sits behind the same sign-in as the dashboard.
+NOVNC_DIR = Path(os.environ.get("STUDIO_NOVNC_DIR", "/usr/share/novnc"))
+VNC_PORT = int(os.environ.get("STUDIO_VNC_PORT", "5900"))
