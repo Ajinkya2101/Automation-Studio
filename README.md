@@ -83,7 +83,10 @@ cat data/initial_passwords.txt                # hand out, then: rm data/initial_
   certificate). Without the `https` profile the studio listens on `127.0.0.1:8010` only; put your own
   proxy in front of it. Don't publish it on the network over plain HTTP: the sign-in and every
   test's data would cross the network unencrypted.
-- **Firewall.** Open 80 and 443 only. VNC (5900) never leaves the container, and port 6080 is no
+- **Another app already on 443?** Set `STUDIO_HTTPS_PORT=8443` (or any free port) in `.env`; the URL
+  becomes `https://<domain>:8443`. Keep 80 free and reachable: the certificate is issued through it.
+- **Firewall.** Open 80 and 443 (or your `STUDIO_HTTPS_PORT`) only, in the server's firewall and in
+  the cloud provider's (on Oracle Cloud: an ingress rule in the subnet's security list). VNC (5900) never leaves the container, and port 6080 is no
   longer used.
 - **Backups.** Back up `data/`: test cases, recordings, runs, saved sign-ins, `users.json`,
   `secret_key` and `logs/audit.jsonl`.

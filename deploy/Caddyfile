@@ -1,10 +1,12 @@
 # HTTPS in front of the studio (docker compose --profile https).
 #
-# STUDIO_DOMAIN with public DNS: Caddy gets a Let's Encrypt certificate by itself.
+# STUDIO_DOMAIN with public DNS: Caddy gets a Let's Encrypt certificate by itself (port 80
+# must be reachable for that). No domain? <ip-with-dashes>.sslip.io resolves to the IP,
+# e.g. 157-151-163-88.sslip.io. STUDIO_HTTPS_PORT moves HTTPS off 443 when another app has it.
 # Internal name only (e.g. studio.corp.local): uncomment "tls internal" and install
 # Caddy's root certificate on the users' PCs, or use "tls cert.pem key.pem" with your
 # company's certificate (mount the files into the caddy container).
-{$STUDIO_DOMAIN} {
+{$STUDIO_DOMAIN}:{$STUDIO_HTTPS_PORT:443} {
 	# tls internal
 
 	# Run logs stream over Server-Sent Events and the live view is a WebSocket:

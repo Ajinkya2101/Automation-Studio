@@ -37,10 +37,14 @@ services:
     restart: unless-stopped
     depends_on: [studio]
     ports:
+      # 80 must be reachable from the internet: Let's Encrypt checks the domain through it
+      # before issuing the certificate, and plain-HTTP visits are redirected to HTTPS.
       - "80:80"
-      - "443:443"
+      # On a server where another app already holds 443, set STUDIO_HTTPS_PORT (e.g. 8443).
+      - "${STUDIO_HTTPS_PORT:-443}:${STUDIO_HTTPS_PORT:-443}"
     environment:
       STUDIO_DOMAIN: ${STUDIO_DOMAIN:-}
+      STUDIO_HTTPS_PORT: ${STUDIO_HTTPS_PORT:-443}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
