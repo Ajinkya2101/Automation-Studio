@@ -39,7 +39,7 @@ def free_port() -> int:
 os.environ["STUDIO_VNC_PORT"] = str(VNC_PORT := free_port())
 
 import uvicorn  # noqa: E402
-from websockets.exceptions import InvalidStatus  # noqa: E402
+from websockets.exceptions import ConnectionClosed, InvalidStatus  # noqa: E402
 from websockets.sync.client import connect  # noqa: E402
 
 from app import audit, events, storage, users  # noqa: E402
@@ -215,13 +215,14 @@ def main():
     check(any(run_id in n for n in names) and not any(n.endswith("app.log") for n in names),
           "user01's issue-log export: their run, no studio log")
     check({e["user"] for e in json.loads(a.call("GET", "/api/audit")[2])} == {"user01"}, "user01's activity: only their own")
-    # user01 is running something: user02 sees only that the browser is busy, and by whom.
-    events.sessions._active = busy = events.Session(kind="run", suite_id=suite_id, case_id="TS_AUTH1", user="user01")
+    # user01 is running something: user02 sees only that user01 is busy, not with what, and is not blocked.
+    busy = events.Session(kind="run", suite_id=suite_id, case_id="TS_AUTH1", user="user01")
     events.sessions._sessions[busy.id] = busy
-    other = json.loads(b.call("GET", "/api/status")[2])["active"]
-    mine = json.loads(a.call("GET", "/api/status")[2])["active"]
-    check(other["user"] == "user01" and "case_id" not in other and mine["case_id"] == "TS_AUTH1",
-          "status: user02 sees user01 is busy, not which test")
+    theirs = json.loads(b.call("GET", "/api/status")[2])
+    mine = json.loads(a.call("GET", "/api/status")[2])
+    check(theirs["active"] is None and [o["user"] for o in theirs["others"]] == ["user01"]
+          and "case_id" not in theirs["others"][0] and mine["active"]["case_id"] == "TS_AUTH1" and not mine["others"],
+          "status: user02 sees user01 is busy, not which test, and has no session of their own")
     check(b.call("POST", f"/api/sessions/{busy.id}/stop")[0] == 404, "user02 cannot stop user01's session")
     check(b.call("GET", f"/api/sessions/{busy.id}/events")[0] == 404, "user02 cannot watch user01's live log")
     busy.status = "completed"
@@ -277,12 +278,36 @@ def main():
         check(False, "live view refused without a user")
     except InvalidStatus:
         check(True, "live view refused without a user")
+    try:
+        connect(f"ws://127.0.0.1:{PORT}/vnc/websockify", additional_headers={
+            "Cookie": a.cookie(), "Origin": BASE}, open_timeout=5).close()
+        check(False, "live view refused to a user with no shown browser of their own")
+    except InvalidStatus:
+        check(True, "live view refused to a user with no shown browser of their own")
+    # user01's recording is shown on the first screen, whose VNC server the fake stands in for.
+    shown = events.Session(kind="record", suite_id=suite_id, case_id="TS_AUTH1", user="user01", screen=0)
+    events.sessions._sessions[shown.id] = shown
+    try:
+        connect(f"ws://127.0.0.1:{PORT}/vnc/websockify", additional_headers={
+            "Cookie": b.cookie(), "Origin": BASE}, open_timeout=5).close()
+        check(False, "user02 cannot watch user01's screen")
+    except InvalidStatus:
+        check(True, "user02 cannot watch user01's screen")
     with connect(f"ws://127.0.0.1:{PORT}/vnc/websockify", subprotocols=["binary"],
                  additional_headers={"Cookie": a.cookie(), "Origin": BASE}, open_timeout=5) as ws:
         greeting = ws.recv(timeout=5)
         ws.send(b"ping")
         echo = ws.recv(timeout=5)
-    check(greeting == b"RFB 003.008\n" and echo == b"ping", "live view relays to the VNC server for a signed-in user")
+        shown.status = "completed"
+        try:
+            while True:
+                ws.recv(timeout=5)
+        except ConnectionClosed:
+            closed = True
+        except TimeoutError:
+            closed = False
+    check(greeting == b"RFB 003.008\n" and echo == b"ping", "live view relays to the screen of the user's own session")
+    check(closed, "the live view closes when the session ends, before the screen goes to someone else")
     try:
         connect(f"ws://127.0.0.1:{PORT}/vnc/websockify", additional_headers={
             "Cookie": a.cookie(), "Origin": "https://evil.example"}, open_timeout=5).close()

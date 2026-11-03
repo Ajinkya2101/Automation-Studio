@@ -17,7 +17,7 @@ from . import audit, auth, diagnostics, storage, users
 from .actions import NO_START_URL, case_target
 from .browser import signed_in_at
 from .config import (BIND_HOST, DATA_DIR, IN_CONTAINER, LIVE_VIEW_URL, LOGIN, MAX_UPLOAD_MB, NOVNC_DIR,
-                     SAMPLE_WORKBOOK, SESSION_HOURS, STATIC_DIR, VNC_PORT)
+                     SAMPLE_WORKBOOK, SESSION_HOURS, STATIC_DIR)
 from .events import BusyError, sessions
 from .excel_io import WorkbookError, build_workbook, parse_workbook
 from .recorder import record_session, signin_session
@@ -177,11 +177,15 @@ def _session(request: Request, session_id: str):
 
 
 def _session_info(request: Request, s) -> dict:
-    """Someone else's session shows only that the browser is busy and who is using it."""
+    """Someone else's session shows only what kind it is and who started it."""
     info = s.info()
     if _is_admin(request) or s.user == _user(request):
         return info
     return {k: info[k] for k in ("id", "kind", "status", "user", "started_at")}
+
+
+def _case_busy(suite_id: str, case_id: str):
+    return next((s for s in sessions.running() if (s.suite_id, s.case_id) == (suite_id, case_id)), None)
 
 
 @app.get("/", include_in_schema=False)
@@ -276,8 +280,7 @@ def admin_overview(request: Request):
         "runs": sum(r.get("run_by") == name for r in all_runs),
         "last_seen": last_seen.get(name),
     } for name, u in sorted(users.load().items())]
-    active = sessions.active()
-    return {"tests": tests, "users": people, "active": active.info() if active else None}
+    return {"tests": tests, "users": people, "active": [s.info() for s in sessions.running()]}
 
 
 @app.get("/api/audit")
@@ -296,8 +299,10 @@ def health():
 
 @app.get("/api/status")
 def status(request: Request):
-    s = sessions.active()
-    return {"active": _session_info(request, s) if s else None}
+    """The user's own session in progress, and what everyone else is doing meanwhile."""
+    s = sessions.active(_user(request))
+    others = [_session_info(request, o) for o in sessions.running() if o is not s]
+    return {"active": s.info() if s else None, "others": others}
 
 
 @app.get("/api/config")
@@ -405,8 +410,8 @@ def case_detail(suite_id: str, case_id: str, request: Request):
     return {
         "suite": {k: suite.get(k) for k in ("id", "filename", "uploaded_at", "created_by", "warnings", "source")},
         "case": case,
-        "target": {"url": target, "has_profile": bool(target and signed_in_at(target)),
-                   "signed_in_at": signed_in_at(target) if target else None},
+        "target": {"url": target, "has_profile": bool(target and signed_in_at(target, _user(request))),
+                   "signed_in_at": signed_in_at(target, _user(request)) if target else None},
         "recording": diagnostics.mask_recording(storage.load_recording(suite_id, case_id)),
         "runs": storage.list_runs(suite_id, case_id),
     }
@@ -415,9 +420,10 @@ def case_detail(suite_id: str, case_id: str, request: Request):
 @app.delete("/api/suites/{suite_id}/cases/{case_id}")
 def delete_case(suite_id: str, case_id: str, request: Request):
     suite, case = _suite_case(request, suite_id, case_id)
-    s = sessions.active()
-    if s and s.suite_id == suite["id"] and s.case_id == case["id"]:
-        raise HTTPException(409, "This test case is being recorded or run. Stop it before deleting.")
+    s = _case_busy(suite["id"], case["id"])
+    if s:
+        raise HTTPException(409, f"This test case is being {'recorded' if s.kind == 'record' else 'run'}"
+                                 f"{f' by {s.user}' if s.user != _user(request) else ''}. Stop it before deleting.")
     storage.delete_case(suite, case["id"])
     log.info("Deleted test case %s from %s (its session logs are kept)", case["id"], suite["id"])
     audit.record(_user(request), "delete_case", _ip(request), suite_id=suite["id"], case_id=case["id"],
@@ -555,21 +561,27 @@ def client_error(err: ClientError, request: Request):
 
 
 # ---- live view: noVNC's page and its WebSocket, behind the same sign-in as the dashboard.
-# The VNC server listens inside the container only; this relays the browser's WebSocket to it.
+# Each shown browser has a virtual screen with its own VNC server, inside the container only.
+# This relays the user's WebSocket to the screen of their own session in progress, and nobody
+# else's: once that session ends the screen goes to the next one, so the relay is closed.
 @app.websocket("/vnc/websockify")
 async def live_view_socket(ws: WebSocket):
     user = auth.user_from_token(ws.cookies.get(auth.COOKIE)) if LOGIN else "local"
     if not user or not _same_origin(ws.headers):
         await ws.close(code=1008)
         return
+    s = sessions.active(user)
+    if not s or s.vnc_port is None:
+        await ws.close(code=1008)
+        return
     offered = ws.scope.get("subprotocols") or []
     try:
-        reader, writer = await asyncio.open_connection("127.0.0.1", VNC_PORT)
+        reader, writer = await asyncio.open_connection("127.0.0.1", s.vnc_port)
     except OSError:
         await ws.close(code=1011)
         return
     await ws.accept(subprotocol="binary" if "binary" in offered else None)
-    log.info("Live view opened by %s from %s", user, _ip(ws))
+    log.info("Live view of %s session %s (screen %s) opened by %s from %s", s.kind, s.id, s.display, user, _ip(ws))
 
     async def to_vnc():
         while True:
@@ -583,7 +595,11 @@ async def live_view_socket(ws: WebSocket):
         while data := await reader.read(65536):
             await ws.send_bytes(data)
 
-    tasks = [asyncio.create_task(to_vnc()), asyncio.create_task(to_browser())]
+    async def session_over():
+        while s.status == "running":
+            await asyncio.sleep(0.5)
+
+    tasks = [asyncio.create_task(to_vnc()), asyncio.create_task(to_browser()), asyncio.create_task(session_over())]
     try:
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     finally:

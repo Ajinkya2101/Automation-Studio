@@ -26,7 +26,7 @@ const S = {
   es: null,         // EventSource
   live: null,       // live / viewed run model
   user: null,       // signed-in user
-  other: null,      // a session someone else started (only one browser session at a time)
+  others: [],       // sessions other users have in progress (they run side by side with ours)
   activity: null,   // audit entries while the Activity view is open
   admin: null,      // admin overview while the Admin view is open
   adminFilter: { user: '', status: '', q: '' },
@@ -57,7 +57,7 @@ async function refresh() {
 
 // ------------------------------------------------------------------ record without Excel
 function showNewForm() {
-  if (S.session || S.other) return;
+  if (S.session) return;
   S.newForm = true;
   S.activity = null;
   S.admin = null;
@@ -213,28 +213,33 @@ function attach(session) {
 
 function setStatus() {
   const pill = $('#status-pill');
-  const s = S.session || S.other;
-  const by = s && s.user && s.user !== S.user ? ` · ${esc(s.user)}` : '';
-  const cid = s && s.case_id ? ` ${esc(s.case_id)}` : '';  // not shown for another user's test
+  const s = S.session;
+  const cid = s && s.case_id ? ` ${esc(s.case_id)}` : '';
+  const kinds = { signin: 'signing in', record: 'recording', run: 'running' };
   if (!s) { pill.className = 'pill idle'; pill.textContent = 'Idle'; }
-  else if (s.kind === 'signin') { pill.className = 'pill signin'; pill.innerHTML = `<span class="blink"></span>Signing in${by}`; }
-  else if (s.kind === 'record') { pill.className = 'pill record'; pill.innerHTML = `<span class="blink"></span>Recording${cid}${by}`; }
-  else { pill.className = 'pill run'; pill.innerHTML = `<span class="blink"></span>Running${cid}${by}`; }
-  pill.title = S.other ? `Started by ${S.other.user || 'someone else'}. Only one sign-in, recording or run can use the browser at a time.` : '';
+  else if (s.kind === 'signin') { pill.className = 'pill signin'; pill.innerHTML = '<span class="blink"></span>Signing in'; }
+  else if (s.kind === 'record') { pill.className = 'pill record'; pill.innerHTML = `<span class="blink"></span>Recording${cid}`; }
+  else { pill.className = 'pill run'; pill.innerHTML = `<span class="blink"></span>Running${cid}`; }
+  // Other users' sessions run side by side with ours: only mentioned, they never block a button.
+  pill.title = S.others.length
+    ? 'Also in progress: ' + S.others.map(o => `${o.user || 'someone'} ${kinds[o.kind] || o.kind}`).join(', ') : '';
   document.querySelectorAll('[data-needs-idle]').forEach(b => { b.disabled = !!s; });
 }
 
-// Someone else may start a session from their own dashboard: check every few seconds,
-// so buttons wait and the pill says who is using the browser.
+// What other users are doing, every few seconds; and our own session if it was started
+// from another tab of the dashboard.
 async function pollStatus() {
-  if (S.session) return;
-  const { active } = await api('/api/status').catch(() => ({ active: S.other }));
-  const was = S.other && S.other.id;
-  S.other = active;
-  if ((active && active.id) !== was) {
+  const st = await api('/api/status').catch(() => null);
+  if (!st) return;
+  const before = S.others.map(o => o.id).join();
+  S.others = st.others || [];
+  if (S.others.map(o => o.id).join() !== before) {
     setStatus();
-    if (!active) await refresh().catch(() => {});  // their recording or run may have changed what is shown
-    else if (!S.activity && !S.admin) renderMain();
+    loadCases().catch(() => {});  // a run that ended may have changed a test's badge (an admin sees everyone's)
+  }
+  if (st.active && !S.session) {
+    await selectCase(st.active.suite_id, st.active.case_id);
+    attach(st.active);
   }
 }
 
@@ -243,7 +248,7 @@ async function pollStatus() {
 function showScreen(session) {
   const box = $('#screen'), frame = $('#screen-frame');
   const url = S.config.live_view_url;
-  if (!session || !url) {
+  if (!session || !url || !session.live_view) {  // a hidden browser has no screen to show
     box.hidden = true;
     frame.removeAttribute('src');
     return;
@@ -336,7 +341,7 @@ function renderMain() {
     return;
   }
   const { case: c, suite, recording, runs, target } = S.detail;
-  const busy = !!(S.session || S.other);
+  const busy = !!S.session;
   const recorded = !!recording;
   const hasTarget = !!target.url;
   const signedIn = target.has_profile;
@@ -695,7 +700,7 @@ function renderAdmin(main) {
   ];
   const creators = [...new Set(tests.map(t => t.created_by || ''))].sort();
   main.innerHTML = `<div class="activity-head"><h1>Admin overview</h1>
-      <span class="muted">${active ? `Now: <b>${esc(active.kind)}</b> of <span class="mono">${esc(active.case_id)}</span> by ${esc(active.user || '–')} · ` : ''}<button class="btn small" id="adm-refresh">Refresh</button></span></div>
+      <span class="muted">${active.length ? `Now: ${active.map(a => `<b>${esc(a.kind)}</b> of <span class="mono">${esc(a.case_id)}</span> by ${esc(a.user || '–')}`).join(', ')} · ` : ''}<button class="btn small" id="adm-refresh">Refresh</button></span></div>
     <div class="stat-row">${tiles.map(([label, n, cls]) => `<div class="card stat ${cls}"><b>${n}</b><span>${label}</span></div>`).join('')}</div>
     <h2 class="adm-h">People</h2>
     <div class="card"><table class="grid">
@@ -792,16 +797,11 @@ window.addEventListener('unhandledrejection', e => reportError(e.reason && e.rea
   if (me.admin && me.login) $('#btn-admin').hidden = false;
   S.config = await api('/api/config').catch(() => S.config);
   await loadCases();
-  const { active } = await api('/api/status');
+  const { active, others } = await api('/api/status');
+  S.others = others || [];
+  setStatus();
   setInterval(pollStatus, 4000);
-  if (active && active.user && active.user !== S.user) {
-    // Someone else's session: show it as busy rather than taking over its live log.
-    S.other = active;
-    setStatus();
-    if (active.suite_id) await selectCase(active.suite_id, active.case_id);  // admin: it may be anyone's test
-    else if (S.cases.length) await selectCase(S.cases[0].suite_id, S.cases[0].case_id);
-    else renderMain();
-  } else if (active) {
+  if (active) {  // our own session, e.g. after reloading the page
     await selectCase(active.suite_id, active.case_id);
     attach(active);
   } else if (S.cases.length) {

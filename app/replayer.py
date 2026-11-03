@@ -459,6 +459,7 @@ def _check_select(page: Page, a: dict, data: dict, net: "_Network | None") -> No
     if got is None or value in got:
         return
     loc, _ = _resolve(_scope(page, a), _candidates(a["locators"]), a.get("target", "list"))
+    _engage(loc)
     loc.select_option(value)
     _settle(page, net)
 
@@ -685,6 +686,22 @@ def _click(loc, a: dict, note, double: bool = False) -> None:
     do(force=True, timeout=5000, **kw)
 
 
+def _engage(loc) -> None:
+    """Best effort: point at and focus a dropdown before choosing in it, as a person's click does.
+
+    Oracle ADF wires a dropdown's change handler only once the control is first
+    pointed at or focused. An option chosen before that shows on screen but is
+    never sent to the server: on a sales order the Business Unit is blank again
+    after the customer is picked, and the Bill-to Account list comes up empty.
+    """
+    for act in (loc.hover, loc.focus):
+        try:
+            act(timeout=2000)
+        except Exception:
+            pass
+    loc.page.wait_for_timeout(100)  # let the app's own hover and focus handlers run
+
+
 def _act(page: Page, a: dict, data: dict, loc, note=lambda msg: None) -> None:
     t = a["type"]
     if t == "click":
@@ -697,6 +714,7 @@ def _act(page: Page, a: dict, data: dict, loc, note=lambda msg: None) -> None:
     elif t == "fill":
         loc.fill(substitute(a.get("value", ""), data))
     elif t == "select":
+        _engage(loc)
         loc.select_option(substitute(a.get("value", ""), data))
     elif t == "upload":
         files = [UPLOADS_DIR / name for name in a.get("files", [])]
@@ -799,8 +817,8 @@ def run_session(session: Session, suite: dict, case: dict, recording: dict,
 
     following = iter([a for s in recording["steps"] for a in s["actions"]][1:])  # the action after the current one
     with sync_playwright() as p:
-        browser = open_context(p, target_url, headless=not headed,
-                               slow_mo=slow_mo if headed else 0)
+        browser = open_context(p, target_url, headless=not headed, slow_mo=slow_mo if headed else 0,
+                               user=session.user, display=session.display)
         trace = {"on": start_trace(browser, f"{case['id']} {run_id}"), "paused": False}
         blog = BrowserLog(browser)
         page = first_page(browser)

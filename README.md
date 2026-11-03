@@ -50,7 +50,8 @@ browser sign-ins live in `data/` on your machine and survive container rebuilds.
    tells the studio which application to open. Every Excel script needs such a `URL` line.
 2. **Sign in** (once). Outlook opens in the live view. Sign in as abhosale@acsesolutions.com,
    approve MFA, choose *Stay signed in*, then click **Save sign-in** on the toolbar.
-   The session is kept in the browser profile under `data/profiles/outlook.office.com`.
+   The session is kept in your own browser profile, under `data/profiles/users/<you>/outlook.office.com`
+   (`data/profiles/outlook.office.com` without the studio sign-in). Each user saves their own sign-in.
    Your password is never recorded or stored by the studio.
 3. **Record steps** while following the toolbar:
    - Step 1: wait for the mailbox, **+ Add check** on "Inbox", then **Next step**.
@@ -136,8 +137,14 @@ deletion and issue-log export with the user, time and IP address, newest first. 
 by value.
 A user's Activity shows their own entries; an admin's shows everyone's.
 
-Only one sign-in, recording or run can use the browser at a time, for all users together. While
-someone else's session runs, the status pill names them (not their test) and the buttons wait.
+Users sign in, record and run at the same time, each in a browser of their own. A user has one
+sign-in, recording or run in progress at a time. A test case being recorded cannot be run or
+recorded by anyone else until the recording ends, nor recorded while it runs. In the container each
+shown browser gets its own virtual screen, so the live view shows a user only their own browser:
+`STUDIO_SCREENS` (default 4) is how many browsers can be shown at once, and `STUDIO_MAX_SESSIONS`
+(default 6) how many run at once in all; a run with *Show browser* unticked needs no screen. When a
+limit is reached, the button says so and nothing is started. The status pill's tooltip lists what
+other users are doing.
 
 ## Run without Docker (development)
 
@@ -222,10 +229,8 @@ is the small multi-page site the smoke and free-form tests record against.
 
 ## Prototype limits
 
-- One sign-in, recording or run at a time, shared by all users.
-- One saved sign-in per site, shared by all users: everyone's recordings and runs act in the
-  application under test as whoever clicked **Save sign-in**. Use a test account there, not a person's
-  own account.
+- One sign-in, recording or run at a time per user, and at most `STUDIO_SCREENS` shown and
+  `STUDIO_MAX_SESSIONS` browsers in all at once.
 - Users are trusted with what the browser can reach: a test can open any http(s) address the server
   can, including internal ones.
 - Users are local to the studio (no single sign-on). A user can act only on their own test cases;

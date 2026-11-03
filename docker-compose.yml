@@ -13,7 +13,8 @@ services:
     build: .
     image: automation-studio:latest
     restart: unless-stopped
-    shm_size: 1g
+    # Shared memory for the browsers: up to STUDIO_MAX_SESSIONS of them run at once.
+    shm_size: 2g
     ports:
       # Keep this on 127.0.0.1 when Caddy (or another proxy) serves the studio.
       - "${STUDIO_PUBLISH:-127.0.0.1:8010}:8010"
@@ -27,6 +28,10 @@ services:
       STUDIO_SESSION_HOURS: ${STUDIO_SESSION_HOURS:-12}
       STUDIO_SLOW_FACTOR: ${STUDIO_SLOW_FACTOR:-1}
       STUDIO_TRACE: ${STUDIO_TRACE:-failures}
+      # Users record and run side by side. Each browser shown at the same time needs a live
+      # screen; hidden ones ("Show browser" unticked) don't. Each browser takes ~0.5 GB of RAM.
+      STUDIO_SCREENS: ${STUDIO_SCREENS:-4}
+      STUDIO_MAX_SESSIONS: ${STUDIO_MAX_SESSIONS:-6}
       # Believe X-Forwarded-For / -Proto from the proxy, so the audit log has the user's IP
       # and the sign-in cookie is marked Secure. Safe while the port above is 127.0.0.1 only.
       STUDIO_TRUSTED_PROXIES: ${STUDIO_TRUSTED_PROXIES:-*}

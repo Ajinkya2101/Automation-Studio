@@ -20,6 +20,13 @@ PORT = int(os.environ.get("STUDIO_PORT", "8010"))
 LIVE_VIEW_URL = os.environ.get("STUDIO_LIVE_VIEW_URL", "")
 IN_CONTAINER = bool(os.environ.get("STUDIO_IN_CONTAINER"))
 SCREEN = os.environ.get("STUDIO_SCREEN", "1600x900")
+# Shown browsers at the same time in the container: each gets its own virtual screen (X display
+# :99, :100, ...) with its own VNC server (VNC_PORT, VNC_PORT + 1, ...); docker/entrypoint.sh
+# starts them. Natively the browsers open as windows on the desktop, so none are needed.
+SCREENS = int(os.environ.get("STUDIO_SCREENS", "4")) if IN_CONTAINER else 0
+FIRST_DISPLAY = 99
+# Browsers (sign-in, recording or run, shown or not) at the same time, across all users.
+MAX_SESSIONS = max(int(os.environ.get("STUDIO_MAX_SESSIONS", "6")), 1)
 
 # Slow instances (Oracle Fusion test pods often are): every replay wait limit is
 # multiplied by this. Replay still moves on as soon as the screen is ready, so a

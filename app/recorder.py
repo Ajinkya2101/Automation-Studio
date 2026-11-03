@@ -123,7 +123,7 @@ def record_session(session: Session, suite: dict, case: dict, start_url: str | N
              steps=[{"step_id": s["step_id"], "name": s["name"]} for s in steps])
 
     with sync_playwright() as p:
-        ctx = open_context(p, start_url, headless=headless)
+        ctx = open_context(p, start_url, headless=headless, user=session.user, display=session.display)
         ctx.expose_binding("__recAction", on_action)
         ctx.expose_binding("__recState", lambda _s: snapshot())
         ctx.expose_binding("__recNext", on_next)
@@ -276,7 +276,7 @@ def signin_session(session: Session, suite: dict, case: dict, headless: bool = F
     log.emit("signin_started", f"Opening {url}. Sign in there (including any MFA prompt), "
              "then click 'Save sign-in' on the toolbar.", url=url)
     with sync_playwright() as p:
-        ctx = open_context(p, url, headless=headless)
+        ctx = open_context(p, url, headless=headless, user=session.user, display=session.display)
         ctx.expose_binding("__recState", snapshot)
         ctx.expose_binding("__recAction", lambda _s, _a: snapshot())
         ctx.expose_binding("__recNext", lambda _s: snapshot())
@@ -292,7 +292,7 @@ def signin_session(session: Session, suite: dict, case: dict, headless: bool = F
             pass
     status = "completed" if st["finished"] else "stopped"
     if st["finished"]:
-        mark_signed_in(url, storage.now_iso())
+        mark_signed_in(url, storage.now_iso(), session.user)
     log.emit("signin_saved" if st["finished"] else "warning",
              "Sign-in saved for this site. Recordings and runs will reuse it."
              if st["finished"] else "Sign-in window closed. Whatever was completed is kept in the profile.",

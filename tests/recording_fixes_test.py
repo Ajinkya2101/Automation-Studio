@@ -134,7 +134,8 @@ def http(method, path, payload=None):
 def wait_idle(timeout=180):
     end = time.time() + timeout
     while time.time() < end:
-        if not http("GET", "/api/status")["active"]:
+        st = http("GET", "/api/status")
+        if not st["active"] and not st["others"]:  # nobody's session, including ones started without a user
             return
         time.sleep(0.5)
     raise TimeoutError("session did not finish")
