@@ -773,6 +773,26 @@ COVERING_POPUP_JS = """(el, pos) => {
 }"""
 
 
+# What a modal dialog puts over the rest of the page (Oracle ADF, Oracle JET, plain HTML / Bootstrap).
+MODAL_COVER = re.compile(r"ModalGlass|GlassPane|oj-component-overlay|modal-backdrop|aria-modal", re.I)
+
+# The text of an open dialog that the element is not part of: what is blocking it. Null when none is open.
+BLOCKING_DIALOG_JS = """el => {
+  const shown = d => d.getClientRects().length && getComputedStyle(d).visibility !== 'hidden';
+  const open = [...document.querySelectorAll(
+      '[data-afr-popupid], [role=dialog], [role=alertdialog], dialog[open], .oj-dialog')]
+    .filter(d => shown(d) && !d.contains(el) && d.innerText.trim());
+  return open.length ? open[open.length - 1].innerText.replace(/\\s+/g, ' ').trim() : null;
+}"""
+
+
+def _blocking_dialog(loc) -> str | None:
+    try:
+        return loc.evaluate(BLOCKING_DIALOG_JS, timeout=2000)
+    except Exception:
+        return None
+
+
 def _covering_popup(loc, a: dict) -> str | None:
     try:
         return loc.evaluate(COVERING_POPUP_JS, a.get("pos"), timeout=2000)
@@ -793,6 +813,13 @@ def _click(loc, a: dict, note, double: bool = False) -> None:
     Not when what covers it is another popup, such as a list an earlier pick left
     open over a dialog's OK button: a click there picks from the list instead. The
     popup gets Escape to close it; if it stays, the step fails.
+
+    Nor when a dialog the recording did not have is open, its modal layer over the
+    page: Oracle's "An order with the Purchase Order Number ... already exists"
+    warning. A click at the element's position lands on that layer and does
+    nothing, and the run fails later with an error that does not mention the
+    dialog. The step stops there and quotes it instead; the dialog is not
+    answered, as neither OK nor Cancel is known to be right.
     """
     do = loc.dblclick if double else loc.click
     target = a.get("target", "The element")
@@ -829,6 +856,12 @@ def _click(loc, a: dict, note, double: bool = False) -> None:
                 f"{target} is covered by a list or popup that is not part of it ({popup}), and Escape did not "
                 "close it. A click at its position would land in that popup instead, so the step stops here. "
                 "Usually an earlier pick left a list open: re-record so the list is closed before this click.")
+    dialog = _blocking_dialog(loc) if MODAL_COVER.search(covered.group(1)) else None
+    if dialog:
+        raise StepFailed(
+            f"{target} is behind a dialog that the recording does not deal with: \"{dialog[:220]}\". Nothing was "
+            "clicked through it. If the application warns about the test data (a number already used), run with "
+            "new test data; if this dialog is a normal part of the process, re-record and answer it.")
     note(f"{target} is covered by {covered.group(1)[:120]}, so the click was made "
          "at its position, as a person's click would be.")
     do(force=True, timeout=5000, **kw)

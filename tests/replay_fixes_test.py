@@ -144,7 +144,24 @@ NOTIFY = """<!doctype html><html><head>""" + STYLE + """</head><body>
     e.preventDefault(); document.getElementById('msg').textContent = 'Opened notifications'; });
 </script></body></html>"""
 
-PAGES = {"tasks": TASKS, "items": ITEMS, "ppr": PPR, "springboard": SPRINGBOARD, "search": SEARCH, "notify": NOTIFY}
+# Save brings up an Oracle-style warning: a glass layer over the page and the message in a popup above it
+# (Create Drop ship Order: the purchase order number was used by the recording already).
+BLOCKED = """<!doctype html><html><head>""" + STYLE + """</head><body>
+<button id="save">Save</button> <a href="#" id="actions">Actions</a><div id="msg"></div>
+<div id="glass" class="AFModalGlassPane" style="display:none;position:fixed;inset:0;z-index:30"></div>
+<div id="warn" data-afr-popupid="warn" style="display:none;position:fixed;left:200px;top:150px;z-index:40;
+     background:#fff;border:1px solid #888;padding:10px">
+  <b>Warning</b><p>An order with the Purchase Order Number 'TESTDS009' already exists in Order Number '25723'.</p>
+  <button id="ok">OK</button></div>
+<script>
+  const $ = id => document.getElementById(id);
+  $('save').addEventListener('click', () => { $('glass').style.display = 'block'; $('warn').style.display = 'block'; });
+  $('ok').addEventListener('click', () => { $('glass').style.display = 'none'; $('warn').style.display = 'none'; });
+  $('actions').addEventListener('click', e => { e.preventDefault(); $('msg').textContent = 'Actions opened'; });
+</script></body></html>"""
+
+PAGES = {"tasks": TASKS, "items": ITEMS, "ppr": PPR, "springboard": SPRINGBOARD, "search": SEARCH, "notify": NOTIFY,
+         "blocked": BLOCKED}
 
 
 @app.get("/replay-fixes/{name}", include_in_schema=False)
@@ -168,6 +185,13 @@ SHIPMENT_TASK = [
     link("Manage Shipment Lines", "div > div > ul > li:nth-of-type(2) > a"),
     {"type": "expect_text", "text": "Opened Manage Shipment Lines"},
 ]
+
+SAVE = {"type": "click", "target": 'button "Save"', "locators": [{"kind": "role", "role": "button", "value": "Save"}]}
+UNEXPECTED_DIALOG = [goto("blocked"), SAVE, link("Actions"), {"type": "expect_text", "text": "Actions opened"}]
+# The same warning, answered in the recording: the click inside the dialog is not stopped.
+ANSWERED_DIALOG = [goto("blocked"), SAVE,
+                   {"type": "click", "target": 'button "OK"', "locators": [{"kind": "role", "role": "button", "value": "OK"}]},
+                   link("Actions"), {"type": "expect_text", "text": "Actions opened"}]
 
 COUNT_CHANGED = [goto("notify"), link("Notifications (0 unread)", "div > ul > li:nth-of-type(1) > a"),
                  {"type": "expect_text", "text": "Opened notifications"}]
@@ -334,6 +358,16 @@ def main():
     r = run("Springboard", SPRINGBOARD_CLICKS)
     check(r["status"] == "passed", f"a 3rd click on an arrow hidden at the end of the strip is skipped: {outcome(r)}")
     check(any("not needed" in e["message"] for e in r["events"]), "the skip is logged")
+
+    r = run("Unexpected dialog", UNEXPECTED_DIALOG)
+    err = r["steps"][0].get("error") or ""
+    check(r["status"] == "failed" and "TESTDS009' already exists" in err and "Nothing was clicked" in err,
+          f"a click behind a dialog the recording does not have stops and quotes it: {err[:240]}")
+    check(not any("so the click was made at its position" in e["message"] for e in r["events"]),
+          "nothing was clicked through the dialog's glass layer")
+
+    r = run("Answered dialog", ANSWERED_DIALOG)
+    check(r["status"] == "passed", f"a dialog the recording answers is not in the way: {outcome(r)}")
 
     r = run("Used-up requisition", USED_UP, saved={"Requisition": "US1015808"})
     err = r["steps"][0].get("error") or ""
