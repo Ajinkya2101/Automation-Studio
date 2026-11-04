@@ -155,6 +155,12 @@ def record_session(session: Session, suite: dict, case: dict, start_url: str | N
         for a in s["actions"]:
             a.pop("el", None)  # only meant something while the page was open
             a.pop("clicks", None)
+    kept = _keep_previous(storage.load_recording(suite["id"], case["id"]), rec_steps)
+    if kept:
+        # Finishing (or closing the browser) before doing anything must not wipe a working recording,
+        # nor, for a test recorded without Excel, its test data.
+        log.emit("warning", kept, level="warn")
+        return status
     if freeform:
         steps, rec_steps = _build_freeform_case(suite, case, steps, rec_steps)
     linked = parameterize(rec_steps, steps)
@@ -175,6 +181,18 @@ def record_session(session: Session, suite: dict, case: dict, start_url: str | N
              f"Recording saved: {total} actions across {len(rec_steps)} steps, {linked} {what}.",
              level="success", total=total, linked=linked, status=status)
     return status
+
+
+def _keep_previous(previous: dict | None, rec_steps: list[dict]) -> str:
+    """Why the previous recording stays, when this session recorded nothing past opening the start page."""
+    if any(a["type"] != "goto" for s in rec_steps for a in s["actions"]):
+        return ""
+    old = [a for s in (previous or {}).get("steps", []) for a in s["actions"]]
+    if not any(a["type"] != "goto" for a in old):
+        return ""
+    return (f"Nothing was recorded after the start page opened, so the existing recording was kept "
+            f"({len(old)} actions, recorded by {previous.get('recorded_by') or 'unknown'} at "
+            f"{previous.get('recorded_at', '?')}).")
 
 
 def append_action(cur: list[dict], action: dict) -> None:

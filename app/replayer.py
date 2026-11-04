@@ -12,8 +12,8 @@ from playwright.sync_api import Page, expect, sync_playwright
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
 from . import storage
-from .actions import (MissingDataError, describe, locator_label, repeated_click, resolve_tokens,
-                      resolved_steps, substitute)
+from .actions import (MissingDataError, data_changes, describe, follow_data, locator_label, repeated_click,
+                      resolve_tokens, resolved_steps, substitute)
 from .browser import first_page, open_context
 from .config import ACTION_TIMEOUT_MS, DATA_DIR, SLOW_FACTOR, TRACE
 from .diagnostics import (BrowserLog, browser_info, capture_page, environment, error_details, mask_data,
@@ -24,6 +24,10 @@ from .excel_io import write_results
 
 class StepFailed(Exception):
     pass
+
+
+class HiddenTarget(StepFailed):
+    """The target is in the page, but never became visible."""
 
 
 class Stopped(Exception):
@@ -42,6 +46,14 @@ COVERED_CLICK_MS = max(ACTION_TIMEOUT_MS // 3, 2000)  # how long a covered eleme
 TAB_WAIT_MS = int(10000 * SLOW_FACTOR)  # how long a recorded tab gets to open before the newest tab stands in
 UPLOADS_DIR = DATA_DIR / "uploads"  # files that recorded uploads attach
 DOM_QUIET_MS = 400       # no DOM changes for this long = screen settled
+POLL_MAX_S = 180 * SLOW_FACTOR      # after a Refresh click: how long a background job's result gets to show up
+REFRESH_EVERY_S = 5 * SLOW_FACTOR   # ... clicking Refresh again this often, as the user did when recording
+REFRESH = re.compile(r'^\w+ "(Refresh|Refresh Results)"$', re.I)
+# What an empty table says on Oracle Fusion pages (and most others).
+EMPTY_LIST = re.compile(r"^\s*(No results found|No data to display|No rows (yet|to display)|No items to display)\.?\s*$",
+                        re.I)
+HTML_TAGS = {"a", "td", "tr", "th", "div", "span", "li", "label", "p", "b", "strong", "h1", "h2", "h3", "h4",
+             "button", "img", "option", "path", "svg"}
 
 # True while the app's own busy flags say it is still working: Oracle ADF (classic
 # Fusion pages) and Oracle JET / Visual Builder (Redwood pages, which load JET
@@ -182,21 +194,33 @@ def _candidates(recorded: list[dict], visible: bool = True) -> list[dict]:
             c["value"] = _clean(c["value"])
         if c["value"]:
             out.append(c)
-    for c in [c for c in out if c["kind"] == "role"]:
+    for c in [c for c in out if c["kind"] == "role" and not c.get("contains")]:
         twin = {k: v for k, v in c.items() if k not in ("count", "index")}  # the position was counted without hidden ones
         out.append({**twin, "include_hidden": True})
         out.append({"kind": "css", "value": f'[aria-label="{_css_str(c["value"])}"]', "must_be_visible": visible})
     seen, unique = set(), []
     for c in out:
-        key = (c["kind"], c.get("role"), c["value"], c.get("include_hidden"))
+        key = (c["kind"], c.get("role"), c["value"], c.get("include_hidden"), c.get("contains"))
         if key not in seen:
             seen.add(key)
             unique.append(c)
     return unique
 
 
+def _bounded(value: str) -> re.Pattern:
+    """`value` as a whole word or number: 1008017 is not part of 10080171."""
+    return re.compile(r"(?<![0-9A-Za-z])" + re.escape(value) + r"(?![0-9A-Za-z])")
+
+
 def _build(page: Page, c: dict):
     k, v = c["kind"], c["value"]
+    if c.get("contains"):
+        # An element that shows this run's test data among other text (see actions.follow_data):
+        # the same kind of control as recorded, so the value echoed elsewhere on the page is not taken.
+        if k == "role":
+            return page.get_by_role(c["role"], name=_bounded(v))
+        loc = page.get_by_text(_bounded(v))
+        return loc.and_(page.locator(c["tag"])) if c.get("tag") in HTML_TAGS else loc
     if k == "role":
         return page.get_by_role(c["role"], name=v, exact=True, include_hidden=c.get("include_hidden", False))
     if k == "label":
@@ -219,6 +243,26 @@ VISIBLE_ANCESTOR_JS = """el => {
   }
   return null;
 }"""
+
+
+# Everything an element shows or is named by: its text, aria-label, title, value and image alt texts.
+SHOWN_JS = """el => [el.innerText, el.getAttribute('aria-label'), el.title, el.value,
+  ...Array.from(el.querySelectorAll('img[alt]'), i => i.alt)].filter(Boolean).join(' ')"""
+
+
+def _other_text(loc, expected: str, any_numbers: bool = False) -> str | None:
+    """What the element shows when that is not `expected`; None when it matches or shows nothing to compare.
+
+    any_numbers: numbers may differ, as in a control named with a count ("Notifications (2 unread)").
+    """
+    try:
+        shown = _clean(loc.evaluate(SHOWN_JS, timeout=2000))
+    except Exception:
+        return None
+    plain = (lambda s: re.sub(r"\d+", "#", s.lower())) if any_numbers else str.lower
+    if not shown or plain(expected) in plain(shown):
+        return None
+    return shown
 
 
 def _reveal(hidden) -> None:
@@ -246,15 +290,22 @@ def _resolve(page, candidates: list[dict], target: str, timeout_ms: int = ACTION
     same number of matches is there again, that position is used. Otherwise
     the other candidates get their chance first, and only when none of them
     identifies one element is the first match of an ambiguous one taken.
+
+    A CSS path through positions (nth-of-type) can land on another control
+    once the page offers other items. A candidate with `expect_text` is only
+    taken when its element shows that text (the name of the link or button
+    recorded): the 2nd task in a list is "Create Miscellaneous Transaction"
+    when the list has not switched to shipment tasks yet, and clicking it
+    opens the wrong page.
     """
     start = time.time()
     deadline = start + timeout_ms / 1000
-    hidden_only, hidden, revealed = False, None, False
+    hidden_only, hidden, revealed, elsewhere = False, None, False, None
     while True:
         allow_css = time.time() - start >= css_grace_s
         positional = fallback = None
         for i, c in enumerate(candidates):
-            if c["kind"] == "css" and not allow_css:
+            if (c["kind"] == "css" or c.get("contains")) and not allow_css:
                 continue
             try:
                 loc = _build(page, c)
@@ -268,6 +319,13 @@ def _resolve(page, candidates: list[dict], target: str, timeout_ms: int = ACTION
                     n = visible
             except Exception:  # page mid-navigation
                 continue
+            if n and c.get("expect_text"):
+                pick = loc if n == 1 else (loc.nth(c["index"]) if c.get("count") == n
+                                           and isinstance(c.get("index"), int) else loc.first)
+                other = _other_text(pick, c["expect_text"], c.get("any_numbers", False))
+                if other:
+                    elsewhere = other
+                    continue
             if n == 1:
                 return loc, i
             if n > 1:
@@ -285,8 +343,14 @@ def _resolve(page, candidates: list[dict], target: str, timeout_ms: int = ACTION
             _reveal(hidden)
             continue
         if time.time() > deadline:
-            if hidden_only:
+            if elsewhere:
                 raise StepFailed(
+                    f"Could not find {target} on the page. The element at its recorded position shows "
+                    f"\"{elsewhere[:60]}\" instead, another control, so it was not clicked. Usually an earlier "
+                    "action did not take effect, such as a list choice that changes what the page offers: see the "
+                    "screenshot.")
+            if hidden_only:
+                raise HiddenTarget(
                     f"Found {target}, but it stayed hidden (for example inside a collapsed menu group or a closed "
                     "panel). The recording is probably missing the click that opens it: re-record this step "
                     "and click the menu group or panel header before the item.")
@@ -359,8 +423,22 @@ def _redo(page: Page, a: dict, data: dict) -> None:
     if a["type"] == "fill":
         loc.fill("")
         loc.press_sequentially(substitute(a.get("value", ""), data), delay=40)
+    elif a["type"] == "click":
+        _click(loc, a, lambda msg: None)
     else:
         loc.press(a["key"])
+
+
+def _refresh(a: dict | None) -> bool:
+    """A click on Refresh: what a person repeats until a background job's result shows up."""
+    return bool(a) and a["type"] == "click" and bool(REFRESH.match(a.get("target", "")))
+
+
+def _control_name(a: dict) -> str:
+    """The name a clicked link, button or menu item was recorded with ('' for other elements)."""
+    if a["type"] not in ("click", "dblclick"):
+        return ""
+    return next((_clean(c["value"]) for c in a.get("locators", []) if c["kind"] == "role"), "")
 
 
 def _ready(page: Page, candidates: list[dict], target: str, until: float):
@@ -388,14 +466,26 @@ def _find(page: Page, a: dict, data: dict, net: "_Network | None", prev: dict | 
     box was wired up, or text typed while the screen was still being built. When
     the target is still missing (or disabled) after RECOVER_AFTER_S and the app
     is idle, so it is not still working on the previous action, that action is
-    repeated once if it is safe to repeat. Clicks are never repeated.
+    repeated once if it is safe to repeat. Clicks are never repeated, except
+    Refresh: after one, the target is usually the result of a background job
+    (a payment process request), so Refresh is clicked again every few seconds
+    for up to POLL_MAX_S, as the user did while recording.
     """
     candidates = _candidates(a["locators"], visible=a["type"] != "upload")  # a file input is usually hidden
+    # A CSS path by position must land on the control recorded: one showing its name (counts in it may
+    # differ), or for a click that follows changed test data, one showing this run's value.
+    expect = a.get("expect") or _control_name(a)
+    if expect:
+        for c in candidates:
+            if c["kind"] == "css" and "nth-of-type" in c["value"]:
+                c["expect_text"], c["any_numbers"] = expect, not a.get("expect")
     target = a.get("target", "element")
+    poll = _refresh(prev)
     start = time.time()
-    deadline = start + ACTION_TIMEOUT_MS / 1000
-    scope = _scope(page, a, until=deadline)
-    recover_at = start + RECOVER_AFTER_S if _repeatable(prev) else None
+    deadline = start + max(ACTION_TIMEOUT_MS / 1000, POLL_MAX_S if poll else 0)
+    scope = _scope(page, a, until=start + ACTION_TIMEOUT_MS / 1000)
+    recover_at = start + RECOVER_AFTER_S if (_repeatable(prev) or poll) else None
+    repeats = 0
     while True:
         try:
             loc, idx = _ready(scope, candidates, target, min(deadline, recover_at) if recover_at else deadline)
@@ -406,21 +496,25 @@ def _find(page: Page, a: dict, data: dict, net: "_Network | None", prev: dict | 
         if not _idle(page, net):
             recover_at = time.time() + 2  # still working on it: keep waiting
             continue
-        note(f"{target} has not appeared after {time.time() - start:.0f}s and the application is idle, so the "
-             f"previous action probably had no effect. Repeating it: {describe(prev, data)}")
+        if not repeats:
+            note(f"{target} has not appeared after {time.time() - start:.0f}s and the application is idle, so the "
+                 + ("result is probably still being processed. Clicking Refresh again every few seconds for up to "
+                    f"{POLL_MAX_S / 60:.0f} minutes." if poll else
+                    f"previous action probably had no effect. Repeating it: {describe(prev, data)}"))
         try:
             _redo(page, prev, data)
             _settle(page, net)
         except Exception:
             pass  # its field is gone too; keep waiting for the target anyway
-        recover_at = None
+        repeats += 1
+        recover_at = time.time() + REFRESH_EVERY_S if poll else None
 
 
 def _execute(page: Page, a: dict, data: dict, net: "_Network | None" = None, prev: dict | None = None,
              note=lambda msg: None, nxt: dict | None = None) -> tuple[str, int]:
     """Run one action and wait for the app to settle. Returns (locator used, candidate index)."""
     loads = net.navigations if net else 0
-    result = _perform(page, a, data, net, prev, note)
+    result = _perform(page, a, data, net, prev, note, nxt)
     if a.get("navigates") and net:
         # This action loaded a page when it was recorded. Give that a moment to start, so the
         # next action is not tried on the page that is about to go away. It is not required:
@@ -540,8 +634,51 @@ def _check_fill(page: Page, a: dict, data: dict, net: "_Network | None") -> None
     _settle(page, net)
 
 
+def _same_control(first: dict | None, second: dict) -> bool:
+    return bool(first) and first["type"] == second["type"] and all(
+        first.get(k) == second.get(k) for k in ("locators", "tab", "frame"))
+
+
+def _shown_now(page: Page, a: dict | None) -> bool:
+    """The target of action `a` is on screen right now (no waiting)."""
+    if not a or not a.get("locators") or a["type"] in ("goto", "scroll", "expect_text") or a.get("global"):
+        return False
+    try:
+        _resolve(_scope(page, a), _candidates(a["locators"]), a.get("target", "element"), timeout_ms=0,
+                 css_grace_s=0)
+        return True
+    except Exception:
+        return False
+
+
+def _needless(page: Page, a: dict, prev: dict | None, nxt: dict | None, waited: bool = False) -> bool:
+    """A click on a hidden control that the run has no use for.
+
+    The arrows that scroll the Oracle springboard hide once the strip reaches its
+    end. A recording with four clicks on the right arrow fails on the fourth when
+    the strip got there in three (another window size, other groups shown). So a
+    click on a control that is in the page but hidden is not needed when the next
+    action's target is on screen already, and the click repeats the previous one,
+    or (once it has stayed hidden the whole wait) the control has no name (an icon).
+    """
+    unnamed = not _control_name(a) and not any(c["kind"] == "text" for c in a.get("locators", []))
+    if a["type"] not in ("click", "dblclick") or not (_same_control(prev, a) or waited and unnamed):
+        return False
+    scope = _scope(page, a)
+    present = False
+    for c in _candidates(a["locators"], visible=False):
+        try:
+            loc = _build(scope, c)
+            if loc.filter(visible=True).count():
+                return False  # it can be clicked
+            present = present or loc.count() > 0
+        except Exception:
+            return False
+    return present and _shown_now(page, nxt)
+
+
 def _perform(page: Page, a: dict, data: dict, net: "_Network | None" = None, prev: dict | None = None,
-             note=lambda msg: None) -> tuple[str, int]:
+             note=lambda msg: None, nxt: dict | None = None) -> tuple[str, int]:
     t = a["type"]
     if t == "goto":
         page.goto(substitute(a["url"], data))
@@ -560,8 +697,19 @@ def _perform(page: Page, a: dict, data: dict, net: "_Network | None" = None, pre
         page.keyboard.press(a["key"])  # pressed with nothing in particular focused
         return "", 0
 
-    candidates, loc, idx = _find(page, a, data, net, prev, note)
-    used =locator_label(candidates[idx]) + (" (under aria-hidden)" if candidates[idx].get("include_hidden") else "")
+    skip = (f"{a.get('target', 'The element')} is hidden and {nxt and nxt.get('target', 'the next target')} is on "
+            "screen already, so this click was not needed (for example a scroll arrow at the end of its strip).")
+    if _needless(page, a, prev, nxt):
+        note(skip)
+        return "skipped: not needed", 0
+    try:
+        candidates, loc, idx = _find(page, a, data, net, prev, note)
+    except HiddenTarget:
+        if not _needless(page, a, prev, nxt, waited=True):
+            raise
+        note(skip)
+        return "skipped: not needed", 0
+    used = locator_label(candidates[idx]) + (" (under aria-hidden)" if candidates[idx].get("include_hidden") else "")
     _check_position(a, candidates[idx], loc, note)
     try:
         _act(page, a, data, loc, note)
@@ -765,6 +913,15 @@ def _page_errors(page: Page) -> str:
     return " | ".join(texts)[:300]
 
 
+def _empty_list(page: Page) -> str:
+    """'No results found.' or the like, when a table on screen says it is empty."""
+    try:
+        texts = page.get_by_text(EMPTY_LIST).filter(visible=True).all_inner_texts()
+    except Exception:
+        return ""
+    return texts[0].strip() if texts else ""
+
+
 # Lines of the automation's own log that say why an action could not be done.
 REASONS = ("intercepts pointer events", "not visible", "not enabled", "not stable", "not editable",
            "outside of the viewport", "not attached", "detached")
@@ -825,8 +982,10 @@ def run_session(session: Session, suite: dict, case: dict, recording: dict,
         page.set_default_timeout(ACTION_TIMEOUT_MS)
         net = _Network(browser)
         env["browser"] = browser_info(page)
+        saved = {k: v for s in case["steps"] for k, v in s["data"].items()}
+        changes = data_changes(recording["steps"], saved, test_data)
         try:
-            _run_steps(session, run, recording, test_data, page, net, blog, shots, following, trace)
+            _run_steps(session, run, recording, test_data, page, net, blog, shots, following, trace, changes)
         except Exception:
             run["crashed"] = True  # the session saves the traceback; keep the trace for it
             raise
@@ -883,8 +1042,13 @@ def _secrets(recording: dict, data: dict) -> list[str]:
 
 
 def _run_steps(session: Session, run: dict, recording: dict, test_data: dict, page: Page,
-               net: "_Network", blog: BrowserLog, shots, following, trace: dict | None = None) -> None:
-    """Play each step in turn; after a failure or a stop the remaining steps are skipped."""
+               net: "_Network", blog: BrowserLog, shots, following, trace: dict | None = None,
+               changes: list | None = None) -> None:
+    """Play each step in turn; after a failure or a stop the remaining steps are skipped.
+
+    `changes` are typed test data values this run changes (actions.data_changes): clicks
+    on what the recorded value brought up look for the new value instead.
+    """
     log = session.log
     run_id = run["id"]
     rdir = storage.run_dir(run_id)
@@ -907,7 +1071,12 @@ def _run_steps(session: Session, run: dict, recording: dict, test_data: dict, pa
             for a in rstep["actions"]:
                 if session.stop_event.is_set():
                     raise Stopped()
+                a, followed = follow_data(a, changes or [])
                 text = describe(a, test_data)
+                if followed:
+                    log.emit("info", f"{text}: recorded as " + "; ".join(
+                        f"\"{old}\", now {key} = \"{new}\"" for key, old, new in followed)
+                        + ", so it looks for this run's value.", step_id=sid, idx=idx)
                 t_act = time.time()
                 nxt = next(following, None)
                 warn = lambda msg: log.emit("info", msg, step_id=sid, idx=idx, level="warn")
@@ -964,10 +1133,17 @@ def _run_steps(session: Session, run: dict, recording: dict, test_data: dict, pa
             shown = _page_errors(page)
             if shown:
                 res["app_message"] = shown
-                error += f". Application shows: {shown}"
+                error = error.rstrip(".") + f". Application shows: {shown}"
                 log.emit("info", f"Application shows: {shown}", step_id=sid, idx=idx, level="error")
             if undone:
-                error += f". Likely cause, earlier in the run: {undone[-1]}"
+                error = error.rstrip(".") + f". Likely cause, earlier in the run: {undone[-1]}"
+            elif "Could not find" in error:
+                empty = _empty_list(page)
+                if empty:
+                    error = error.rstrip(".") + (
+                        f". The page shows \"{empty}\": what this step looks for is not in the list. If the "
+                        "recording or an earlier run already used it up (approved, processed, shipped), run with "
+                        "test data for one that is still open.")
         if diag is not None:
             # For the issue log: the page at that moment and what the browser reported during the step.
             diag["page"] = capture_page(page, rdir / "failure", f"{idx + 1:02d}_{sid}")

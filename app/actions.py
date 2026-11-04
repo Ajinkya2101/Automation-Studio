@@ -14,6 +14,11 @@ class MissingDataError(KeyError):
     pass
 
 
+def is_secret(key: str) -> bool:
+    """Test data that is a password: its value is masked everywhere it is shown or saved."""
+    return "pass" in (key or "").lower()
+
+
 def resolve_tokens(value: str, when: datetime) -> str:
     """{now}, {date}, {time}, {stamp} in Excel test data become fresh values
     each session, e.g. a unique email subject per run."""
@@ -101,6 +106,8 @@ def parameterize(rec_steps: list[dict], case_steps: list[dict]) -> int:
                 continue
             key = match(a, a[field], local) or match(a, a[field], everything)
             if key:
+                if a["type"] == "fill" and not a.get("masked") and not is_secret(key):
+                    a["recorded_value"] = a[field].strip()  # what later clicks show it as (see follow_data)
                 a["param"] = key
                 a[field] = "${" + key + "}"
                 linked += 1
@@ -116,6 +123,79 @@ def parameterize(rec_steps: list[dict], case_steps: list[dict]) -> int:
                     a[field], a["param"] = text, ", ".join(used)
                     linked += 1
     return linked
+
+
+def _bounded(value: str) -> re.Pattern:
+    """`value` as a whole word or number: 1008017 is not part of 10080171."""
+    return re.compile(r"(?<![0-9A-Za-z])" + re.escape(value) + r"(?![0-9A-Za-z])")
+
+
+def data_changes(rec_steps: list[dict], saved: dict[str, str], data: dict[str, str]) -> list[tuple[str, str, str]]:
+    """(key, recorded value, value of this run) for each typed test data value this run changes.
+
+    The recorded value is kept with the action since this change; older recordings
+    typed what the test case's data still holds, unless that holds a {now} token.
+    """
+    out, seen = [], set()
+    for s in rec_steps:
+        for a in s["actions"]:
+            key = a.get("param")
+            if a["type"] != "fill" or not key or key in seen or key not in data or a.get("masked") or is_secret(key):
+                continue  # a password is never looked for on screen, nor named in the log
+            seen.add(key)
+            old = a.get("recorded_value") or ("" if TOKEN.search(saved.get(key, "")) else saved.get(key, ""))
+            old, new = (old or "").strip(), (data[key] or "").strip()
+            if len(old) >= SHORT_VALUE and new and old != new:
+                out.append((key, old, new))
+    # Longest first, so "INV_TEST_10" is replaced before an overlapping "INV_TEST_1".
+    return sorted(out, key=lambda c: len(c[1]), reverse=True)
+
+
+def follow_data(a: dict, changes: list[tuple[str, str, str]]) -> tuple[dict, list[tuple[str, str, str]]]:
+    """Click action `a` as it reads with this run's test data, and the changes that apply to it.
+
+    A recording clicks what the typed value brought up: the suggestion
+    "1008018(VLS): Test item NIR RPA" after typing item 1008018, the link "1008018"
+    in the table, the row of the payment request named test_ppr_01. Run with other
+    data, those clicks must look for the new value. Where the recorded value is
+    part of a longer text (the rest describes the old item), an element of the same
+    kind that shows the new value is accepted too, and a CSS path by position only
+    counts when its element shows the new value.
+    """
+    if a["type"] not in ("click", "dblclick") or not changes:
+        return a, []
+    used = [c for c in changes if any(_bounded(c[1]).search(loc.get("value", "")) for loc in a.get("locators", [])
+                                      if loc["kind"] != "css" or "nth-of-type" not in loc["value"])]
+    if not used:
+        return a, []
+    b = copy.deepcopy(a)
+
+    def swap(text: str) -> str:
+        for _key, old, new in used:
+            text = _bounded(old).sub(lambda _m: new, text)
+        return text
+
+    loose = []
+    for loc in b["locators"]:
+        if loc["kind"] == "css" and "nth-of-type" in loc["value"]:
+            continue
+        before = loc["value"]
+        loc["value"] = swap(before)
+        if loc["kind"] not in ("role", "text"):
+            continue
+        for _key, old, new in used:
+            if before.strip() != old and _bounded(old).search(before):
+                # The value is only part of the text: take any such element that shows the new value.
+                loose.append({**{k: v for k, v in loc.items() if k not in ("count", "index")},
+                              "value": new, "contains": True})
+    tag = b.get("target", "").split(" ", 1)[0]
+    for c in loose:
+        if c["kind"] == "text":
+            c["tag"] = tag
+    b["locators"] += loose
+    b["target"] = swap(b.get("target", ""))
+    b["expect"] = used[0][2]  # a CSS path by position must land on an element showing the new value
+    return b, used
 
 
 def repeated_click(first: dict | None, second: dict) -> bool:

@@ -15,6 +15,7 @@ import getpass
 import html
 import json
 import logging
+import os
 import platform
 import re
 import shutil
@@ -36,7 +37,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
 from . import storage
-from .actions import MASK
+from .actions import MASK, is_secret
 from .config import (ACTION_TIMEOUT_MS, BASE_DIR, DATA_DIR, DEVICE_NAME, IN_CONTAINER, LOGS_DIR, OS_USER,
                      SCREEN, SLOW_FACTOR, TRACE)
 
@@ -46,10 +47,6 @@ log = logging.getLogger("studio")
 
 
 # ---------------------------------------------------------------- masking
-def is_secret(key: str) -> bool:
-    return "pass" in (key or "").lower()
-
-
 def mask_data(data: dict) -> dict:
     return {k: (MASK if is_secret(k) and v else v) for k, v in (data or {}).items()}
 
@@ -93,7 +90,7 @@ def app_version() -> str:
     """The studio's git commit, read from .git directly so it also works in the container (no git there)."""
     global _version
     if _version is None:
-        _version = "unknown"
+        _version = os.environ.get("STUDIO_VERSION", "").strip() or "unknown"
         try:
             git = BASE_DIR / ".git"
             head = (git / "HEAD").read_text(encoding="utf-8").strip()

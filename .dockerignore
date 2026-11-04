@@ -3,7 +3,11 @@ data/
 __pycache__/
 **/__pycache__/
 *.pyc
-.git/
+.git
+# Only what tells the studio its own commit (shown as "studio <branch>@<commit>" in run logs and issue logs).
+!.git/HEAD
+!.git/refs/heads
+!.git/packed-refs
 .env
 .impeccable/
 issue_log/
