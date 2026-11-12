@@ -17,8 +17,8 @@ from typing import Callable
 from playwright.sync_api import Page, sync_playwright
 
 from . import storage
-from .actions import (DOUBLE_CLICK_S, NO_START_URL, case_target, describe, parameterize, repeated_click,
-                      resolved_steps)
+from .actions import (DOUBLE_CLICK_S, NO_START_URL, PARAM, case_target, describe, is_secret, parameterize,
+                      repeated_click, resolved_steps)
 from .browser import first_page, mark_signed_in, open_context
 from .excel_io import build_workbook
 from .events import Session
@@ -163,7 +163,8 @@ def record_session(session: Session, suite: dict, case: dict, start_url: str | N
         return status
     if freeform:
         steps, rec_steps = _build_freeform_case(suite, case, steps, rec_steps)
-    linked = parameterize(rec_steps, steps)
+    parameterize(rec_steps, steps)
+    linked = linked_count(rec_steps)
     total = sum(len(s["actions"]) for s in rec_steps)
     warnings = _review(rec_steps, steps, linked, freeform)
     recording = {
@@ -181,6 +182,11 @@ def record_session(session: Session, suite: dict, case: dict, start_url: str | N
              f"Recording saved: {total} actions across {len(rec_steps)} steps, {linked} {what}.",
              level="success", total=total, linked=linked, status=status)
     return status
+
+
+def linked_count(rec_steps: list[dict]) -> int:
+    """How many recorded actions use test data (${Key})."""
+    return sum(1 for s in rec_steps for a in s["actions"] if a.get("param"))
 
 
 def _keep_previous(previous: dict | None, rec_steps: list[dict]) -> str:
@@ -244,30 +250,87 @@ def _field_key(action: dict) -> str:
     return key if key[:1].isalpha() else f"Field {key}".strip()
 
 
-def _build_freeform_case(suite: dict, case: dict, steps: list[dict], rec_steps: list[dict]):
-    """Turn a free-form recording into test-case steps, test data and an Excel script."""
+# Clicks that only put the cursor in a field: typing the same field again after them corrects it.
+FOCUS_TARGET = re.compile(r"^(field|combobox|textbox|searchbox|spinbutton|input|textarea)\b")
+
+
+def _same_field(a: dict, b: dict) -> bool:
+    return all(a.get(k) == b.get(k) for k in ("locators", "tab", "frame")) and a.get("target") == b.get("target")
+
+
+def _retyped(actions: list[dict], j: int) -> dict | None:
+    """The earlier fill of the same field that the fill at `j` corrects, or None.
+
+    The Oracle sign-in page comes up with the last user name filled in: the user
+    types over it after clicking into the fields, and both fills are recorded.
+    They are one value (the user name this test signs in with), not "Username"
+    and "Username 2". Only clicks into fields and other typing may come between:
+    after a button, link, list pick or key press the earlier value has been used,
+    and the field typed again is a second value (a second search).
+    """
+    for b in reversed(actions[:j]):
+        if b["type"] == "fill":
+            if _same_field(b, actions[j]):
+                return b if b.get("param") else None
+            continue
+        if b["type"] == "click" and FOCUS_TARGET.match(b.get("target", "")) and not b.get("navigates"):
+            continue
+        return None
+    return None
+
+
+def freeform_steps(case: dict, steps: list[dict], rec_steps: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Test-case steps with their test data for a free-form recording, its typed values linked as ${Key}.
+
+    Each typed value is linked to a key named after its own field, never to another
+    field's key that happens to hold the same value (two GL codes both 4111). The
+    same value typed into fields of the same name (the invoice Amount on the header
+    and on the line, the Order searched on two pages) shares one key, so changing
+    it once changes both.
+    """
     kept = ([(i, s, r) for i, (s, r) in enumerate(zip(steps, rec_steps)) if r["actions"]]
             or [(0, steps[0], rec_steps[0])])
-    new_steps, new_rec, used = [], [], set()
+    new_steps, new_rec, used, values = [], [], set(), {}
     for n, (orig, s, r) in enumerate(kept, start=1):
         step_id = f"{case['id']}.{n}"
         data = {}
-        for a in r["actions"]:
-            if a["type"] == "fill" and a.get("value") and not a.get("masked"):
-                key, i = _field_key(a), 2
-                base = key
+        acts = r["actions"]
+        for j, a in enumerate(acts):
+            if a["type"] != "fill" or not a.get("value") or a.get("masked") or PARAM.search(a["value"]):
+                continue
+            earlier = _retyped(acts, j)
+            base = _field_key(a)
+            same = next((k for k, v in values.items() if v == a["value"] and re.sub(r" \d+$", "", k) == base), None)
+            if earlier:
+                key = earlier["param"]
+            elif same:
+                key = same
+            else:
+                key, i = base, 2
                 while key in used:
                     key, i = f"{base} {i}", i + 1
                 used.add(key)
-                data[key] = a["value"]
+            data[key] = values[key] = a["value"]
+            a["param"] = key
+        for a in acts:
+            if a["type"] == "fill" and a.get("param") in data and not PARAM.search(a.get("value", "")):
+                if not is_secret(a["param"]):
+                    a["recorded_value"] = data[a["param"]].strip()  # what later clicks show (see follow_data)
+                a["value"] = "${" + a["param"] + "}"
         checks = [a["text"] for a in r["actions"] if a["type"] == "expect_text"]
         # Unnamed steps are renumbered after empty ones are dropped; named steps keep their name.
         name = s["name"] if s["name"] != f"Step {orig + 1}" else f"Step {n}"
         new_steps.append({
             "step_id": step_id, "name": name, "role": "",
-            "description": "\n".join(f"{i}. {describe(a)}" for i, a in enumerate(r["actions"], start=1)),
+            "description": "\n".join(f"{i}. {describe(a, data)}" for i, a in enumerate(r["actions"], start=1)),
             "data": data, "expected": "; ".join(f'"{c}" is shown' for c in checks)})
         new_rec.append({**r, "step_id": step_id, "name": name})
+    return new_steps, new_rec
+
+
+def _build_freeform_case(suite: dict, case: dict, steps: list[dict], rec_steps: list[dict]):
+    """Turn a free-form recording into test-case steps, test data and an Excel script."""
+    new_steps, new_rec = freeform_steps(case, steps, rec_steps)
     case["steps"] = new_steps
     stored = storage.load_suite(suite["id"]) or suite
     stored["cases"] = [case if c["id"] == case["id"] else c for c in stored["cases"]]

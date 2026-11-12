@@ -1,6 +1,7 @@
 """Automation Studio (prototype): dashboard API and live event stream, served
 by one FastAPI process."""
 import asyncio
+import re
 import shutil
 import tempfile
 from datetime import datetime
@@ -14,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import audit, auth, diagnostics, storage, users
-from .actions import NO_START_URL, case_target
+from .actions import NO_START_URL, SHORT_VALUE, _bounded, case_target
 from .browser import signed_in_at
 from .config import (BIND_HOST, DATA_DIR, IN_CONTAINER, LIVE_VIEW_URL, LOGIN, MAX_UPLOAD_MB, NOVNC_DIR,
                      SAMPLE_WORKBOOK, SESSION_HOURS, STATIC_DIR)
@@ -472,6 +473,86 @@ def start_run(suite_id: str, case_id: str, req: RunRequest, request: Request):
     audit.record(_user(request), "run_start", _ip(request), suite_id=suite_id, case_id=case_id, run_id=run_id,
                  changed_data=sorted(k for k, v in req.data.items() if excel.get(k) != v))
     return s.info()
+
+
+class TextParamRequest(BaseModel):
+    step: int            # index of the recording step
+    action: int          # index of the click in that step
+    text: str = ""       # the part of the clicked text that changes from run to run ("TEST_INV_15")
+    key: str = ""        # the test data name for it ("Invoice")
+
+
+def _text_param_target(request: Request, suite_id: str, case_id: str, req: TextParamRequest):
+    suite, case = _suite_case(request, suite_id, case_id)
+    s = _case_busy(suite["id"], case["id"])
+    if s:
+        raise HTTPException(409, f"This test case is being {'recorded' if s.kind == 'record' else 'run'}. "
+                                 "Change its test data when that has finished.")
+    recording = storage.load_recording(suite_id, case_id)
+    try:
+        rstep = recording["steps"][req.step]
+        a = rstep["actions"][req.action]
+    except (TypeError, KeyError, IndexError):
+        raise HTTPException(404, "That action is not in the recording.")
+    if a["type"] not in ("click", "dblclick"):
+        raise HTTPException(400, "Only the text of a click can be made test data.")
+    cstep = next((cs for cs in case["steps"] if cs["step_id"] == rstep["step_id"]), None)
+    if cstep is None:
+        raise HTTPException(400, "The recording's step is not in the test case any more: record it again.")
+    return suite, case, recording, a, cstep
+
+
+@app.post("/api/suites/{suite_id}/cases/{case_id}/text-params")
+def add_text_param(suite_id: str, case_id: str, req: TextParamRequest, request: Request):
+    """Make part of a clicked text test data, e.g. the invoice number in the worklist link
+    "Approval of Invoice TEST_INV_15 from ...". A run with another value clicks the
+    element that shows that value (actions.data_changes / follow_data)."""
+    suite, case, recording, a, cstep = _text_param_target(request, suite_id, case_id, req)
+    text = " ".join(req.text.split())
+    key = " ".join(re.sub(r"[^\w ./()&-]", " ", req.key).split())[:36]
+    if len(text) < SHORT_VALUE:
+        raise HTTPException(400, f"Pick at least {SHORT_VALUE} characters of the clicked text, such as a number "
+                                 "or name: shorter text is found in too many places.")
+    if not key or not key[0].isalpha():
+        raise HTTPException(400, "Give the test data a name that starts with a letter, e.g. Invoice.")
+    shown = [a.get("target", "")] + [c["value"] for c in a.get("locators", []) if c["kind"] != "css"]
+    if not any(_bounded(text).search(" ".join(v.split())) for v in shown):
+        raise HTTPException(400, f"\"{text}\" is not part of what this click recorded: {a.get('target', '')}")
+    current = {k: v for s in case["steps"] for k, v in s["data"].items()}
+    if key in current and current[key] != text:
+        raise HTTPException(400, f"\"{key}\" is already test data (value \"{current[key]}\"). Use another name.")
+    a["text_params"] = [tp for tp in a.get("text_params", []) if tp["key"] != key] + [{"key": key, "value": text}]
+    cstep["data"][key] = text
+    storage.save_recording(suite_id, case_id, recording)
+    storage.save_suite(suite)
+    if case.get("freeform"):
+        build_workbook(storage.workbook_path(suite_id), case)
+    audit.record(_user(request), "add_test_data", _ip(request), suite_id=suite_id, case_id=case_id,
+                 key=key, value=text, clicked=a.get("target", ""))
+    return {"ok": True, "key": key, "value": text}
+
+
+@app.delete("/api/suites/{suite_id}/cases/{case_id}/text-params")
+def remove_text_param(suite_id: str, case_id: str, req: TextParamRequest, request: Request):
+    suite, case, recording, a, cstep = _text_param_target(request, suite_id, case_id, req)
+    kept = [tp for tp in a.get("text_params", []) if tp["key"] != req.key]
+    if len(kept) == len(a.get("text_params", [])):
+        raise HTTPException(404, f"\"{req.key}\" is not test data of this click.")
+    a["text_params"] = kept
+    if not kept:
+        a.pop("text_params")
+    still_used = any(tp["key"] == req.key for s in recording["steps"] for b in s["actions"]
+                     for tp in b.get("text_params", [])) or any(
+        b.get("param") == req.key for s in recording["steps"] for b in s["actions"])
+    if not still_used:
+        cstep["data"].pop(req.key, None)
+    storage.save_recording(suite_id, case_id, recording)
+    storage.save_suite(suite)
+    if case.get("freeform"):
+        build_workbook(storage.workbook_path(suite_id), case)
+    audit.record(_user(request), "remove_test_data", _ip(request), suite_id=suite_id, case_id=case_id,
+                 key=req.key, clicked=a.get("target", ""))
+    return {"ok": True}
 
 
 @app.post("/api/sessions/{session_id}/stop")

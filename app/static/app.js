@@ -45,7 +45,9 @@ async function selectCase(suite_id, case_id, keepLive = false) {
   S.sel = { suite_id, case_id };
   S.detail = await api(`/api/suites/${suite_id}/cases/${encodeURIComponent(case_id)}`);
   S.runForm = false;
-  if (!keepLive && !(S.session && S.session.suite_id === suite_id && S.session.case_id === case_id)) S.live = null;
+  // Back on the test whose session is running: show its live panel again, with everything that happened meanwhile.
+  if (S.session && S.session.suite_id === suite_id && S.session.case_id === case_id) S.live = S.sessionLive || S.live;
+  else if (!keepLive) S.live = null;
   renderCaseList();
   renderMain();
 }
@@ -171,6 +173,11 @@ async function startSignin() {
 async function startRun() {
   const data = {};
   document.querySelectorAll('[data-key]').forEach(inp => { data[inp.dataset.key] = inp.value; });
+  // A used field left empty types nothing: the sign-in fails with an invalid user name, a search finds everything.
+  const { defaults = {}, linked = new Set() } = S.runFormInfo || {};
+  const emptied = Object.keys(data).filter(k => linked.has(k) && !data[k].trim() && String(defaults[k] ?? '').trim());
+  if (emptied.length && !confirm(`These test data fields are empty, but had a value when the test was recorded:\n\n${
+    emptied.map(k => `  • ${k}`).join('\n')}\n\nThe run will type nothing there (a sign-in with an empty user name fails). Run anyway?`)) return;
   const body = {
     headed: $('#opt-headed').checked,
     slow_mo: Number($('#opt-speed').value),
@@ -192,16 +199,20 @@ async function stopSession() {
 function attach(session) {
   if (S.es) S.es.close();
   S.session = session;
-  S.live = newLive(session.kind, session.run_id);
+  // The session's own model: it keeps collecting events while the user looks at another test
+  // (S.live is then null or another run), and is shown again when they come back.
+  const live = newLive(session.kind, session.run_id);
+  S.live = S.sessionLive = live;
   setStatus();
   showScreen(session);
   renderMain();
   const es = new EventSource(`/api/sessions/${session.id}/events`);
-  es.onmessage = e => { applyEvent(S.live, JSON.parse(e.data)); renderLive(); };
+  es.onmessage = e => { applyEvent(live, JSON.parse(e.data)); if (S.live === live) renderLive(); };
   es.addEventListener('end', async () => {
     es.close();
     S.es = null;
     S.session = null;
+    S.sessionLive = null;
     setStatus();
     showScreen(null);
     await refresh();
@@ -434,10 +445,15 @@ function renderTab() {
         ${c.freeform
           ? `${recording.linked_parameters} typed value(s) saved as test data <span class="param">\${…}</span>, so you can change them in the run form.`
           : `${recording.linked_parameters} value(s) linked to Excel test data <span class="param">\${…}</span>, so changing the Excel data changes what the automation types.`}</div>
-      ${recording.steps.map(s => `<div class="rec-step">
+      ${recording.steps.map((s, si) => `<div class="rec-step">
         <h3>${esc(s.step_id)} <span class="muted" style="font-weight:500">${esc(s.name)}</span></h3>
-        ${s.actions.length ? s.actions.map(renderAction).join('') : '<div class="faint">No actions recorded for this step.</div>'}
+        ${s.actions.length ? s.actions.map((a, ai) => renderAction(a, si, ai)).join('') : '<div class="faint">No actions recorded for this step.</div>'}
       </div>`).join('')}</div>`;
+    body.querySelectorAll('[data-tp-add]').forEach(b => b.onclick = () => addTextParam(...b.dataset.tpAdd.split(',').map(Number)));
+    body.querySelectorAll('[data-tp-del]').forEach(b => b.onclick = () => {
+      const [si, ai] = b.dataset.tpDel.split(',').map(Number);
+      removeTextParam(si, ai, b.dataset.key);
+    });
   } else {
     if (!runs.length) {
       body.innerHTML = `<div class="card empty-box">No automated runs yet.</div>`;
@@ -474,8 +490,8 @@ function describeAction(a) {
   const val = a.masked && !a.param ? '••••••' : a.value;
   switch (a.type) {
     case 'goto': return `Open <span class="mono">${esc(a.url)}</span>`;
-    case 'click': return `Click ${esc(a.target)}`;
-    case 'dblclick': return `Double-click ${esc(a.target)}`;
+    case 'click': return `Click ${clickTarget(a)}`;
+    case 'dblclick': return `Double-click ${clickTarget(a)}`;
     case 'upload': return `Attach <span class="mono">${esc((a.files || []).join(', '))}</span> to ${esc(a.target)}`;
     case 'fill': return `Type “${withParams(val)}” into ${esc(a.target)}`;
     case 'press': return `Press ${esc(a.key)}${a.global ? '' : ` in ${esc(a.target)}`}`;
@@ -486,13 +502,58 @@ function describeAction(a) {
   }
 }
 
-function renderAction(a) {
+// A click's target with the parts that are test data shown as ${Key}.
+function clickTarget(a) {
+  let t = esc(a.target);
+  (a.text_params || []).forEach(tp => {
+    t = t.split(esc(tp.value)).join(`<span class="param" title="&quot;${esc(tp.value)}&quot; when recorded">\${${esc(tp.key)}}</span>`);
+  });
+  return t;
+}
+
+// The full text a click was recorded with (its target is cut at 60 characters).
+const clickText = a => ((a.locators || []).find(l => l.kind === 'role' || l.kind === 'text') || {}).value || '';
+
+function renderAction(a, si, ai) {
   const loc = a.locators && a.locators[0];
   const locText = loc ? (loc.kind === 'role' ? `role=${loc.role} name="${loc.value}"` : `${loc.kind}="${loc.value}"`) : '';
   const labels = { goto: 'open', click: 'click', dblclick: 'click', upload: 'file', fill: 'type', press: 'key', select: 'select', expect_text: 'check', scroll: 'scroll' };
+  const clicked = (a.type === 'click' || a.type === 'dblclick') && si !== undefined && clickText(a).trim().length >= 4;
+  const tps = clicked ? (a.text_params || []).map(tp => `<button class="btn small" data-tp-del="${si},${ai}" data-key="${esc(tp.key)}"
+      title="Stop using ${esc(tp.key)} here: runs look for &quot;${esc(tp.value)}&quot; again">\${${esc(tp.key)}} ×</button>`).join(' ') : '';
+  const add = clicked ? `<button class="btn small" data-tp-add="${si},${ai}"
+      title="Part of this text changes every run (an invoice or order number)? Make it test data you can change in the run form.">+ test data</button>` : '';
   return `<div class="act"><span class="type ${a.type}">${labels[a.type] || a.type}</span>
     <div>${describeAction(a)}${a.navigates ? '<span class="chip">loads page</span>' : ''}${a.tab ? `<span class="chip">tab ${a.tab + 1}</span>` : ''}${a.frame ? '<span class="chip">in frame</span>' : ''}
+    ${clicked ? `<span class="tp-tools">${tps} ${add}</span>` : ''}
     ${locText ? `<div class="loc">${esc(locText)}${a.locators.length > 1 ? ` <span title="Fallback locators used if the first one is not found">+${a.locators.length - 1} fallback</span>` : ''}</div>` : ''}</div></div>`;
+}
+
+async function addTextParam(si, ai) {
+  const a = S.detail.recording.steps[si].actions[ai];
+  const full = clickText(a);
+  const guess = (full.match(/(?:^|\s)((?=[\w./-]*\d)[\w./-]{4,40})(?=\s|$)/) || ['', ''])[1];
+  const text = prompt(`Which part of this clicked text changes from run to run (e.g. an invoice or order number)?\n\n${full}\n\n`
+    + 'Type it exactly as shown. Runs then click the element that shows the value you give in the run form.', guess);
+  if (!text || !text.trim()) return;
+  const before = full.slice(0, full.indexOf(text.trim())).trim().split(/\s+/).pop() || '';
+  const key = prompt('Name of this test data in the run form:', /^[A-Za-z]{3,}$/.test(before) ? before : 'Value');
+  if (!key || !key.trim()) return;
+  await changeTextParam('POST', { step: si, action: ai, text: text.trim(), key: key.trim() });
+}
+
+async function removeTextParam(si, ai, key) {
+  if (!confirm(`Stop using ${key} in this click? Runs then look for the text as it was recorded.`)) return;
+  await changeTextParam('DELETE', { step: si, action: ai, key });
+}
+
+async function changeTextParam(method, body) {
+  try {
+    await api(`/api/suites/${S.sel.suite_id}/cases/${encodeURIComponent(S.sel.case_id)}/text-params`, {
+      method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    await selectCase(S.sel.suite_id, S.sel.case_id, true);
+  } catch (err) { alert(err.message); }
 }
 
 // ------------------------------------------------------------------ run options
@@ -502,9 +563,13 @@ function renderRunForm() {
   if (!S.runForm || S.session) { slot.innerHTML = ''; return; }
   const { case: c, recording } = S.detail;
   const linked = new Set();
-  recording.steps.forEach(s => s.actions.forEach(a => a.param && linked.add(a.param)));
+  recording.steps.forEach(s => s.actions.forEach(a => {
+    if (a.param) a.param.split(',').forEach(k => linked.add(k.trim()));
+    (a.text_params || []).forEach(tp => linked.add(tp.key));
+  }));
   const data = {};
   c.steps.forEach(s => Object.entries(s.data).forEach(([k, v]) => { if (!(k in data)) data[k] = v; }));
+  S.runFormInfo = { defaults: data, linked };
   const keys = Object.keys(data).sort((a, b) => linked.has(b) - linked.has(a));
   slot.innerHTML = `<div class="card run-form">
     <h3>Run ${esc(c.id)} automatically</h3>

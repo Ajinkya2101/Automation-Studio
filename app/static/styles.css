@@ -297,3 +297,8 @@ table.grid { width: 100%; border-collapse: collapse; }
   .how { grid-template-columns: 1fr; }
   .case-head { flex-direction: column; }
 }
+
+/* Clicked text made test data (Recording tab) */
+.tp-tools { margin-left: 6px; white-space: nowrap; }
+.tp-tools .btn.small { padding: 0 7px; font-size: 11px; line-height: 18px; opacity: .75; }
+.act:hover .tp-tools .btn.small { opacity: 1; }

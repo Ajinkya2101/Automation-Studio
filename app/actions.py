@@ -84,6 +84,10 @@ def parameterize(rec_steps: list[dict], case_steps: list[dict]) -> int:
     A short value is only linked to data named after its own field: "2" chosen in
     Business Unit is not the "2" typed into Quantity, and linking the two makes a
     later change to Quantity pick another business unit.
+
+    When several data values are the same ("4111" for both GL_Code_Location and
+    GL_Code_Product_Cat), the one named after the field wins. Otherwise both fields
+    would type GL_Code_Location, and a run with two different codes types the wrong one.
     """
     by_step = {s["step_id"]: s["data"] for s in case_steps}
     everything = {k: v for s in case_steps for k, v in s["data"].items()}
@@ -91,8 +95,9 @@ def parameterize(rec_steps: list[dict], case_steps: list[dict]) -> int:
 
     def match(a, value, data):
         value = (value or "").strip()
-        return next((k for k, v in data.items() if v and v.strip() == value
-                     and (len(value) >= SHORT_VALUE or _names_field(k, a))), None)
+        hits = [k for k, v in data.items() if v and v.strip() == value
+                and (len(value) >= SHORT_VALUE or _names_field(k, a))]
+        return next((k for k in hits if _names_field(k, a)), hits[0] if hits else None)
 
     # Longest values first so "Automation test 14:32" wins over a shorter overlap.
     by_length = sorted(((k, v.strip()) for k, v in everything.items() if len(v.strip()) >= SHORT_VALUE),
@@ -139,6 +144,13 @@ def data_changes(rec_steps: list[dict], saved: dict[str, str], data: dict[str, s
     out, seen = [], set()
     for s in rec_steps:
         for a in s["actions"]:
+            # Text in a click that a tester made test data ("TEST_INV_15" in the worklist link).
+            for tp in a.get("text_params", []):
+                key, old = tp["key"], (tp.get("value") or "").strip()
+                new = (data.get(key) or "").strip()
+                if key not in seen and len(old) >= SHORT_VALUE and new and old != new:
+                    seen.add(key)
+                    out.append((key, old, new))
             key = a.get("param")
             if a["type"] != "fill" or not key or key in seen or key not in data or a.get("masked") or is_secret(key):
                 continue  # a password is never looked for on screen, nor named in the log

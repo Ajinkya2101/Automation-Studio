@@ -54,6 +54,39 @@ EMPTY_LIST = re.compile(r"^\s*(No results found|No data to display|No rows (yet|
                         re.I)
 HTML_TAGS = {"a", "td", "tr", "th", "div", "span", "li", "label", "p", "b", "strong", "h1", "h2", "h3", "h4",
              "button", "img", "option", "path", "svg"}
+# A name that is one record number or code: pick slip 1156596, requisition US1015808, CO-171, TEST_INV_15.
+# Its digits are what it is, so they may not differ the way a count in a name may ("(2 unread)").
+RECORD_NUMBER = re.compile(r"^(?=[\w./-]*\d)[\w./-]{3,40}$")
+# How long a record number gets to show up as recorded before another number in its place is considered.
+RENUMBER_AFTER_S = 8 * SLOW_FACTOR
+# What a list of values shows when it has nothing to offer.
+EMPTY_POPUP = re.compile(r"^\s*(Search\.\.\.|No results found\.?|No data to display\.?|No matches found\.?)\s*$", re.I)
+# An Oracle message with its code, e.g. "You must provide a valid value for the Status attribute. (EGO-2745049)".
+ORACLE_MSG_JS = r"""() => {
+  const code = /\(([A-Z][A-Z0-9]{1,6}-\d{4,8})\)/;
+  const shown = d => d.getClientRects().length && getComputedStyle(d).visibility !== 'hidden';
+  for (const d of document.querySelectorAll('[data-afr-popupid], [role=dialog], [role=alertdialog], [role=alert]')) {
+    if (!shown(d)) continue;
+    const t = (d.innerText || '').replace(/\s+/g, ' ').trim();
+    const m = t.match(code);
+    if (m) return t.slice(Math.max(0, m.index - 220), m.index + m[0].length).trim();
+  }
+  return null;
+}"""
+
+
+def _numbers_only_differ(a: str, b: str) -> list[tuple[str, str]]:
+    """The record numbers (4+ digits) that differ between two texts that are otherwise the same,
+    e.g. "The shipment 1218328 was created." and "... 1218329 ...": [("1218328", "1218329")]."""
+    pa, pb = re.findall(r"\d{4,}", a), re.findall(r"\d{4,}", b)
+    if len(pa) != len(pb) or re.sub(r"\d{4,}", "#", a) != re.sub(r"\d{4,}", "#", b):
+        return []
+    return [(x, y) for x, y in zip(pa, pb) if x != y]
+
+
+def _rows_css(css: str) -> str:
+    """A CSS path by position with its row positions dropped: every row's element at that spot."""
+    return re.sub(r"\b(tr|li)\:nth-of-type\(\d+\)", r"\1", css)
 
 # True while the app's own busy flags say it is still working: Oracle ADF (classic
 # Fusion pages) and Oracle JET / Visual Builder (Redwood pages, which load JET
@@ -265,6 +298,25 @@ def _other_text(loc, expected: str, any_numbers: bool = False) -> str | None:
     return shown
 
 
+def _renumbered(page, c: dict, shown: str) -> tuple[int, str | None]:
+    """(how many numbers the list shows at the recorded spot, the number to click instead or None).
+
+    Oracle gives a pick slip, shipment or order a new number each run, so the link
+    recorded as "1156596" is "1157596" in this run's search results. When the list
+    shows exactly one record there, and its number is of the same kind (same letters
+    and separators), it is this run's record. With several, it could be any of them.
+    """
+    expected = c["expect_text"]
+    other = _clean(shown)
+    if not RECORD_NUMBER.match(other) or re.sub(r"\d+", "#", other) != re.sub(r"\d+", "#", expected):
+        return 0, None
+    try:
+        rows = page.locator(_rows_css(c["value"])).filter(visible=True).count()
+    except Exception:
+        return 0, None
+    return rows, other if rows == 1 else None
+
+
 def _reveal(hidden) -> None:
     """Best effort: point at what a hidden target hangs under, as the user's mouse did on the way to it."""
     try:
@@ -300,7 +352,7 @@ def _resolve(page, candidates: list[dict], target: str, timeout_ms: int = ACTION
     """
     start = time.time()
     deadline = start + timeout_ms / 1000
-    hidden_only, hidden, revealed, elsewhere = False, None, False, None
+    hidden_only, hidden, revealed, elsewhere, numbered = False, None, False, None, 0
     while True:
         allow_css = time.time() - start >= css_grace_s
         positional = fallback = None
@@ -325,6 +377,12 @@ def _resolve(page, candidates: list[dict], target: str, timeout_ms: int = ACTION
                 other = _other_text(pick, c["expect_text"], c.get("any_numbers", False))
                 if other:
                     elsewhere = other
+                    if c.get("renumber") and time.time() - start >= RENUMBER_AFTER_S:
+                        rows, renumbered = _renumbered(page, c, other)
+                        numbered = max(numbered, rows)
+                        if renumbered:
+                            c["renumbered"] = (c["expect_text"], renumbered)
+                            return pick, i
                     continue
             if n == 1:
                 return loc, i
@@ -343,6 +401,13 @@ def _resolve(page, candidates: list[dict], target: str, timeout_ms: int = ACTION
             _reveal(hidden)
             continue
         if time.time() > deadline:
+            if elsewhere and numbered > 1:
+                raise StepFailed(
+                    f"Could not find {target} on the page. It is a record number, and this run's list shows "
+                    f"{numbered} other numbers in its place (the first is \"{elsewhere[:40]}\"): the application "
+                    "probably gave the record a new number this run, but with several in the list it is not known "
+                    "which one is this run's, so none was clicked. Re-record with a search that finds only this "
+                    "run's record (for example by its order number).")
             if elsewhere:
                 raise StepFailed(
                     f"Could not find {target} on the page. The element at its recorded position shows "
@@ -474,11 +539,15 @@ def _find(page: Page, a: dict, data: dict, net: "_Network | None", prev: dict | 
     candidates = _candidates(a["locators"], visible=a["type"] != "upload")  # a file input is usually hidden
     # A CSS path by position must land on the control recorded: one showing its name (counts in it may
     # differ), or for a click that follows changed test data, one showing this run's value.
+    # A name that is a record number must match digit for digit; another number in its place is only
+    # taken when it is the one record the list shows (see _renumbered).
     expect = a.get("expect") or _control_name(a)
     if expect:
+        record = not a.get("expect") and bool(RECORD_NUMBER.match(expect))
         for c in candidates:
             if c["kind"] == "css" and "nth-of-type" in c["value"]:
-                c["expect_text"], c["any_numbers"] = expect, not a.get("expect")
+                c["expect_text"], c["any_numbers"] = expect, not a.get("expect") and not record
+                c["renumber"] = record
     target = a.get("target", "element")
     poll = _refresh(prev)
     start = time.time()
@@ -511,10 +580,14 @@ def _find(page: Page, a: dict, data: dict, net: "_Network | None", prev: dict | 
 
 
 def _execute(page: Page, a: dict, data: dict, net: "_Network | None" = None, prev: dict | None = None,
-             note=lambda msg: None, nxt: dict | None = None) -> tuple[str, int]:
-    """Run one action and wait for the app to settle. Returns (locator used, candidate index)."""
+             note=lambda msg: None, nxt: dict | None = None, learned: list | None = None) -> tuple[str, int]:
+    """Run one action and wait for the app to settle. Returns (locator used, candidate index).
+
+    learned: gets (recorded number, this run's number) for each record number the application
+    gave out anew this run, so later actions can look for the new one (see _renumbered).
+    """
     loads = net.navigations if net else 0
-    result = _perform(page, a, data, net, prev, note, nxt)
+    result = _perform(page, a, data, net, prev, note, nxt, learned)
     if a.get("navigates") and net:
         # This action loaded a page when it was recorded. Give that a moment to start, so the
         # next action is not tried on the page that is about to go away. It is not required:
@@ -678,7 +751,7 @@ def _needless(page: Page, a: dict, prev: dict | None, nxt: dict | None, waited: 
 
 
 def _perform(page: Page, a: dict, data: dict, net: "_Network | None" = None, prev: dict | None = None,
-             note=lambda msg: None, nxt: dict | None = None) -> tuple[str, int]:
+             note=lambda msg: None, nxt: dict | None = None, learned: list | None = None) -> tuple[str, int]:
     t = a["type"]
     if t == "goto":
         page.goto(substitute(a["url"], data))
@@ -710,7 +783,16 @@ def _perform(page: Page, a: dict, data: dict, net: "_Network | None" = None, pre
         note(skip)
         return "skipped: not needed", 0
     used = locator_label(candidates[idx]) + (" (under aria-hidden)" if candidates[idx].get("include_hidden") else "")
-    _check_position(a, candidates[idx], loc, note)
+    renumbered = candidates[idx].get("renumbered")
+    if renumbered:
+        old, new = renumbered
+        note(f"{a.get('target', 'The element')}: the application gave this record a new number in this run "
+             f"(\"{new}\" where the recording had \"{old}\"). It is the only record in the list, so it was clicked; "
+             f"later actions that show {old} look for {new}.")
+        if learned is not None:
+            learned.append((old, new))
+    else:
+        _check_position(a, candidates[idx], loc, note, learned)
     try:
         _act(page, a, data, loc, note)
     except StepFailed:
@@ -727,11 +809,12 @@ def _perform(page: Page, a: dict, data: dict, net: "_Network | None" = None, pre
     return used, idx
 
 
-def _check_position(a: dict, cand: dict, loc, note) -> None:
+def _check_position(a: dict, cand: dict, loc, note, learned: list | None = None) -> None:
     """Warn when a click found its element only by its position in the page, and that element
     shows other text than was clicked when recording: a row of a list picked by position can
     be another value than the one recorded. Only a warning, as the text can legitimately change
-    (a message with this run's order number)."""
+    (a message with this run's order number). When only record numbers differ ("The shipment
+    1218329 was created." for 1218328), they are this run's numbers: later actions use them."""
     if a["type"] not in ("click", "dblclick") or cand["kind"] != "css" or "nth-of-type" not in cand["value"]:
         return
     text = next((_clean(c["value"]) for c in a.get("locators", []) if c["kind"] == "text"), "")
@@ -741,9 +824,16 @@ def _check_position(a: dict, cand: dict, loc, note) -> None:
         shown = _clean(loc.inner_text(timeout=2000))
     except Exception:
         return
-    if text not in shown:
-        note(f"{a.get('target', 'The element')} was not found by its text, and the element at its recorded "
-             f"position shows \"{shown[:60]}\" instead. If a later action fails, this click is the likely cause.")
+    if text in shown:
+        return
+    numbers = _numbers_only_differ(text, shown)
+    if numbers and learned is not None:
+        learned.extend(numbers)
+        note(f"{a.get('target', 'The element')} shows this run's number: \"{shown[:80]}\". Later actions that "
+             "show " + ", ".join(f"{old} look for {new}" for old, new in numbers) + ".")
+        return
+    note(f"{a.get('target', 'The element')} was not found by its text, and the element at its recorded "
+         f"position shows \"{shown[:60]}\" instead. If a later action fails, this click is the likely cause.")
 
 
 COVERED = re.compile(r"(<[^\n]*?) intercepts pointer events")
@@ -857,6 +947,14 @@ def _click(loc, a: dict, note, double: bool = False) -> None:
                 "close it. A click at its position would land in that popup instead, so the step stops here. "
                 "Usually an earlier pick left a list open: re-record so the list is closed before this click.")
     dialog = _blocking_dialog(loc) if MODAL_COVER.search(covered.group(1)) else None
+    if dialog and EMPTY_POPUP.match(dialog):
+        # Not a dialog to answer: the list the previous click opened has no values (Oracle shows only
+        # "Search..."), so what the recording picked from it was found behind it instead.
+        raise StepFailed(
+            f"{target} could not be picked: the list that opened offers nothing to choose (it only shows "
+            f"\"{dialog.strip()[:40]}\"), and the {target} found on the page is behind that list. Usually the "
+            "record already has what this step adds (for example the item already has this structure), or an "
+            "earlier choice leaves nothing to pick: run with other test data.")
     if dialog:
         raise StepFailed(
             f"{target} is behind a dialog that the recording does not deal with: \"{dialog[:220]}\". Nothing was "
@@ -944,6 +1042,14 @@ def _page_errors(page: Page) -> str:
         return ""
     texts = [t.strip() for t in texts if t.strip()]
     return " | ".join(texts)[:300]
+
+
+def _oracle_message(page: Page) -> str | None:
+    """An Oracle message with an error code that is on screen now, e.g. "... (EGO-2745049)"."""
+    try:
+        return page.evaluate(ORACLE_MSG_JS)
+    except Exception:
+        return None
 
 
 def _empty_list(page: Page) -> str:
@@ -1080,9 +1186,11 @@ def _run_steps(session: Session, run: dict, recording: dict, test_data: dict, pa
     """Play each step in turn; after a failure or a stop the remaining steps are skipped.
 
     `changes` are typed test data values this run changes (actions.data_changes): clicks
-    on what the recorded value brought up look for the new value instead.
+    on what the recorded value brought up look for the new value instead. Record numbers
+    the application gives out anew in this run (a pick slip) are added to them as they are found.
     """
     log = session.log
+    changes = list(changes or [])
     run_id = run["id"]
     rdir = storage.run_dir(run_id)
     trace = trace or {"on": False, "paused": False}
@@ -1100,11 +1208,12 @@ def _run_steps(session: Session, run: dict, recording: dict, test_data: dict, pa
         log.emit("step_start", f"{sid} · {res['name']}", step_id=sid, idx=idx)
         t_step = time.time()
         done, checks, error, diag, a = 0, [], None, None, None
+        said, last_said = [], None  # Oracle messages with an error code seen during this step
         try:
             for a in rstep["actions"]:
                 if session.stop_event.is_set():
                     raise Stopped()
-                a, followed = follow_data(a, changes or [])
+                a, followed = follow_data(a, changes)
                 text = describe(a, test_data)
                 if followed:
                     log.emit("info", f"{text}: recorded as " + "; ".join(
@@ -1127,8 +1236,18 @@ def _run_steps(session: Session, run: dict, recording: dict, test_data: dict, pa
                                  "screen, so the password is not saved in it.", step_id=sid, idx=idx)
                 try:
                     page = _tab(net, a, page, warn)
-                    used, cand = _execute(page, a, test_data, net, prev, warn, nxt)
+                    learned = []
+                    used, cand = _execute(page, a, test_data, net, prev, warn, nxt, learned)
                     prev = a
+                    for old, new in learned:
+                        if not any(c[1] == old for c in changes):
+                            changes.append(("this run's number", old, new))
+                            changes.sort(key=lambda c: len(c[1]), reverse=True)
+                    message = _oracle_message(page) if a["type"] not in ("scroll", "goto") else None
+                    if message and message != last_said:
+                        said.append(message)
+                        warn(f"The application shows a message: \"{message}\"")
+                    last_said = message
                     if a["type"] == "select":
                         shown = _selected(page, a)
                         if shown and shown[1]:
@@ -1162,12 +1281,13 @@ def _run_steps(session: Session, run: dict, recording: dict, test_data: dict, pa
             diag = {"error": error_details(exc),
                     "action": {k: v for k, v in a.items() if k in ("type", "target", "locators", "tab", "frame",
                                                                     "param", "navigates")}}
-            log.emit("action", str(exc), step_id=sid, idx=idx, status="fail", level="error")
-            shown = _page_errors(page)
+            shown = _page_errors(page) or _oracle_message(page) or ""
             if shown:
                 res["app_message"] = shown
                 error = error.rstrip(".") + f". Application shows: {shown}"
-                log.emit("info", f"Application shows: {shown}", step_id=sid, idx=idx, level="error")
+            elif said:
+                res["app_message"] = said[-1]
+                error = error.rstrip(".") + f". Earlier in this step the application said: \"{said[-1]}\""
             if undone:
                 error = error.rstrip(".") + f". Likely cause, earlier in the run: {undone[-1]}"
             elif "Could not find" in error:
@@ -1177,6 +1297,9 @@ def _run_steps(session: Session, run: dict, recording: dict, test_data: dict, pa
                         f". The page shows \"{empty}\": what this step looks for is not in the list. If the "
                         "recording or an earlier run already used it up (approved, processed, shipped), run with "
                         "test data for one that is still open.")
+            # The live log and the issue log get the whole explanation, not only the automation's error.
+            diag["error"]["message"] = error
+            log.emit("action", error, step_id=sid, idx=idx, status="fail", level="error")
         if diag is not None:
             # For the issue log: the page at that moment and what the browser reported during the step.
             diag["page"] = capture_page(page, rdir / "failure", f"{idx + 1:02d}_{sid}")
