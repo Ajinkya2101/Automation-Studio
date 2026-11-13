@@ -264,6 +264,7 @@ def admin_overview(request: Request):
                 "recorded_by": rec.get("recorded_by") if rec else None,
                 "recorded_at": rec.get("recorded_at") if rec else None,
                 "recording_warnings": len(rec.get("warnings") or []) if rec else 0,
+                "unproven": results.unproven(last, rec),
                 "runs": len(runs), "passed": sum(r["status"] == "passed" for r in runs),
                 "failed": sum(results.display_status(r) == "failed" for r in runs),
                 "needs_data": sum(results.display_status(r) == "needs_data" for r in runs),
@@ -329,11 +330,13 @@ def cases(request: Request):
         for c in suite["cases"]:
             runs = by_case.get((suite["id"], c["id"]), [])
             last = runs[0] if runs else None
+            rec = storage.load_recording(suite["id"], c["id"])
             out.append({
                 "suite_id": suite["id"], "filename": suite["filename"], "uploaded_at": suite["uploaded_at"],
                 "created_by": suite.get("created_by"),
                 "case_id": c["id"], "title": c["title"], "steps": len(c["steps"]),
-                "recorded": storage.recording_path(suite["id"], c["id"]).exists(),
+                "recorded": bool(rec),
+                "unproven": results.unproven(last, rec),
                 "last_run": results.summary(last) if last else None,
                 "recent": results.recent(runs),
             })

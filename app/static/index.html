@@ -7,49 +7,73 @@
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
+  <a class="skip" href="#main">Skip to content</a>
   <header class="topbar">
     <div class="brand">
       <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 2a10 10 0 1 0 10 10h-2a8 8 0 1 1-2.34-5.66L15 9h7V2l-2.93 2.93A9.97 9.97 0 0 0 12 2Zm-1 6v5l4 2.5.9-1.5-2.9-1.8V8h-2Z"/></svg>
       <span>Automation Studio</span><span class="tag">Prototype</span>
     </div>
     <div class="top-actions">
-      <span id="status-pill" class="pill idle">Idle</span>
-      <a href="/api/sample">Sample: Outlook</a>
-      <a href="/api/issue-log" id="export-issues" title="Everything needed to look into problems on another computer: every run that did not pass with its full errors, screenshots, page snapshots and Playwright traces, all recording and sign-in logs, and this device's setup, with an Excel summary">⭳ Export issue log</a>
-      <button class="link" id="btn-admin" hidden title="Every test case by everyone, with its status, and what each user has done">Admin</button>
-      <button class="link" id="btn-activity" title="Who uploaded, recorded, ran, stopped or deleted what">Activity</button>
-      <span class="who" id="who" hidden><span>Signed in as <b id="who-name"></b></span><button class="link" id="btn-logout">Sign out</button></span>
+      <span id="status-pill" class="pill idle" role="status">Idle</span>
+      <details class="menu" id="top-menu">
+        <summary class="menu-btn"><span id="who-name">Menu</span>
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="m7 10 5 5 5-5H7Z"/></svg></summary>
+        <div class="menu-list" role="menu">
+          <button role="menuitem" id="btn-activity">Activity <small>Who uploaded, recorded, ran or deleted what</small></button>
+          <button role="menuitem" id="btn-admin" hidden>Admin overview <small>Every test case by everyone</small></button>
+          <a role="menuitem" href="/api/issue-log" id="export-issues">Export issue log <small>Every run that did not pass, with errors, screenshots and traces, as a ZIP</small></a>
+          <button role="menuitem" id="btn-help">How it works</button>
+          <button role="menuitem" id="btn-logout" hidden>Sign out</button>
+        </div>
+      </details>
     </div>
   </header>
 
-  <div class="layout">
-    <aside class="sidebar">
-      <label class="dropzone" id="dropzone">
+  <div class="layout" id="layout">
+    <aside class="sidebar" aria-label="Test cases">
+      <div class="dropzone" id="dropzone">
         <input type="file" id="file-input" accept=".xlsx" hidden>
-        <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path fill="currentColor" d="M11 16V7.8l-3.3 3.3-1.4-1.4L12 4l5.7 5.7-1.4 1.4L13 7.8V16h-2Zm-6 4v-5h2v3h10v-3h2v5H5Z"/></svg>
-        <strong>Upload test Excel</strong>
-        <span>Drop an .xlsx here or click to browse</span>
-      </label>
-      <button class="btn side-new" id="btn-new-rec" data-needs-idle><span class="dot"></span>Record without Excel</button>
-      <div class="side-title">Test cases</div>
-      <ul id="case-list" class="case-list"></ul>
+        <button class="btn upload-btn" id="btn-upload" type="button">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M11 16V7.8l-3.3 3.3-1.4-1.4L12 4l5.7 5.7-1.4 1.4L13 7.8V16h-2Zm-6 4v-5h2v3h10v-3h2v5H5Z"/></svg>
+          Upload test Excel</button>
+        <span id="upload-hint">or drop an .xlsx here · <a href="/api/sample">sample script</a></span>
+      </div>
+      <button class="btn side-new" id="btn-new-rec" type="button" data-needs-idle><span class="dot"></span>Record without Excel</button>
+      <div class="side-head">
+        <h2 class="side-title" id="cases-title">Test cases</h2>
+        <input type="search" id="case-filter" placeholder="Filter" aria-label="Filter test cases" hidden>
+      </div>
+      <ul id="case-list" class="case-list" aria-labelledby="cases-title"></ul>
     </aside>
     <div class="main-col">
       <!-- Live view of the automated browser (container only). Kept outside #main so
            re-rendering the page never reconnects it. -->
-      <section id="screen" class="card screen" hidden>
+      <section id="screen" class="card screen" hidden aria-label="Live browser">
         <div class="screen-head">
-          <span class="dotlive"></span><b id="screen-title">Live browser</b>
+          <span class="dotlive" aria-hidden="true"></span><b id="screen-title">Live browser</b>
           <span class="muted" id="screen-hint"></span>
-          <a id="screen-pop" target="_blank" rel="noopener">Open in new tab ↗</a>
+          <a id="screen-pop" target="_blank" rel="noopener">Open in new tab</a>
         </div>
         <iframe id="screen-frame" title="Live view of the automated browser"></iframe>
       </section>
-      <main id="main"></main>
+      <main id="main" tabindex="-1"></main>
     </div>
   </div>
 
-  <div id="lightbox" class="lightbox" hidden><img alt="Step screenshot"></div>
+  <dialog id="lightbox" class="lightbox" aria-label="Step screenshot">
+    <div class="lb-bar"><span id="lb-caption"></span>
+      <span class="lb-nav"><button class="btn small" id="lb-prev">Previous</button>
+      <button class="btn small" id="lb-next">Next</button>
+      <button class="btn small" id="lb-close">Close</button></span></div>
+  </dialog>
+  <dialog id="confirm" class="confirm" aria-labelledby="cf-title" aria-describedby="cf-body">
+    <form method="dialog">
+      <h2 id="cf-title"></h2>
+      <div id="cf-body"></div>
+      <div class="foot"><button class="btn" value="cancel" id="cf-cancel">Cancel</button><button class="btn primary" value="ok" id="cf-ok">OK</button></div>
+    </form>
+  </dialog>
+  <div id="announcer" class="sr-only" aria-live="polite"></div>
   <script src="/static/app.js"></script>
 </body>
 </html>
