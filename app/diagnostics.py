@@ -427,6 +427,8 @@ def run_log_text(run: dict) -> str:
         d = s.get("diagnostics")
         if s.get("error"):
             lines.append(f"      Error: {s['error']}")
+        if s.get("needs_data"):
+            lines.append(f"      Needs new test data: {s['needs_data']}")
         if d:
             pg = d.get("page") or {}
             lines.append(f"      Page: {pg.get('url', '?')}  \"{pg.get('title', '')}\"")

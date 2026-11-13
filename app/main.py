@@ -14,7 +14,7 @@ from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import audit, auth, diagnostics, storage, users
+from . import audit, auth, diagnostics, results, storage, users
 from .actions import NO_START_URL, SHORT_VALUE, _bounded, case_target
 from .browser import signed_in_at
 from .config import (BIND_HOST, DATA_DIR, IN_CONTAINER, LIVE_VIEW_URL, LOGIN, MAX_UPLOAD_MB, NOVNC_DIR,
@@ -265,10 +265,11 @@ def admin_overview(request: Request):
                 "recorded_at": rec.get("recorded_at") if rec else None,
                 "recording_warnings": len(rec.get("warnings") or []) if rec else 0,
                 "runs": len(runs), "passed": sum(r["status"] == "passed" for r in runs),
-                "failed": sum(r["status"] == "failed" for r in runs),
-                "last_run": {k: last.get(k) for k in ("id", "status", "started_at", "run_by", "duration_ms")}
-                if last else None,
-                "status": last["status"] if last else ("recorded" if rec else "new"),
+                "failed": sum(results.display_status(r) == "failed" for r in runs),
+                "needs_data": sum(results.display_status(r) == "needs_data" for r in runs),
+                "last_run": results.summary(last) if last else None,
+                "recent": results.recent(runs),
+                "status": results.display_status(last) if last else ("recorded" if rec else "new"),
             })
     last_seen: dict[str, str] = {}
     for e in audit.recent(20000):  # newest first
@@ -318,19 +319,23 @@ def sample():
 
 @app.get("/api/cases")
 def cases(request: Request):
-    runs = storage.list_runs()
+    by_case: dict[tuple, list] = {}
+    for r in storage.list_runs():  # newest first
+        by_case.setdefault((r["suite_id"], r["case_id"]), []).append(r)
     out = []
     for suite in storage.list_suites():
         if not _can_see(request, suite):
             continue
         for c in suite["cases"]:
-            last = next((r for r in runs if r["suite_id"] == suite["id"] and r["case_id"] == c["id"]), None)
+            runs = by_case.get((suite["id"], c["id"]), [])
+            last = runs[0] if runs else None
             out.append({
                 "suite_id": suite["id"], "filename": suite["filename"], "uploaded_at": suite["uploaded_at"],
                 "created_by": suite.get("created_by"),
                 "case_id": c["id"], "title": c["title"], "steps": len(c["steps"]),
                 "recorded": storage.recording_path(suite["id"], c["id"]).exists(),
-                "last_run": {"status": last["status"], "started_at": last["started_at"]} if last else None,
+                "last_run": results.summary(last) if last else None,
+                "recent": results.recent(runs),
             })
     return out
 
@@ -408,13 +413,18 @@ def suite_workbook(suite_id: str, request: Request):
 def case_detail(suite_id: str, case_id: str, request: Request):
     suite, case = _suite_case(request, suite_id, case_id)
     target = case_target(case)
+    recording = storage.load_recording(suite_id, case_id)
+    runs = storage.list_runs(suite_id, case_id)
+    for r in runs:
+        r.update({k: v for k, v in results.summary(r).items() if k in ("display", "by_admin")})
     return {
         "suite": {k: suite.get(k) for k in ("id", "filename", "uploaded_at", "created_by", "warnings", "source")},
         "case": case,
         "target": {"url": target, "has_profile": bool(target and signed_in_at(target, _user(request))),
                    "signed_in_at": signed_in_at(target, _user(request)) if target else None},
-        "recording": diagnostics.mask_recording(storage.load_recording(suite_id, case_id)),
-        "runs": storage.list_runs(suite_id, case_id),
+        "recording": diagnostics.mask_recording(recording),
+        "runs": runs,
+        "run_form": results.run_form(case, recording, runs),
     }
 
 

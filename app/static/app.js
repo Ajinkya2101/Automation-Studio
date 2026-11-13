@@ -317,17 +317,33 @@ function applyEvent(L, ev) {
 }
 
 // ------------------------------------------------------------------ render: sidebar
+// The last few results of a test, oldest first: ✓ passed, ✗ failed, ! needs new test data, ■ stopped.
+// An admin's run is drawn hollow, so it is told apart from the testers' runs.
+function resultDots(recent) {
+  if (!recent || !recent.length) return '';
+  const mark = { passed: '✓', failed: '✗', needs_data: '!', stopped: '■', running: '…' };
+  return `<span class="dots">${recent.map(r => `<span class="dot ${esc(r.display)}${r.by_admin ? ' admin' : ''}"
+    title="${esc(STATUS_LABEL[r.display] || r.display)} · ${esc(fmtDate(r.started_at))} · ${esc(r.run_by || '–')}${r.by_admin ? ' (admin run)' : ''}${r.needs_data ? `
+${esc(r.needs_data)}` : ''}">${mark[r.display] || '·'}</span>`).join('')}</span>`;
+}
+
+function statusBadge(display, reason, short = false) {
+  const label = short && display === 'needs_data' ? 'needs data' : (STATUS_LABEL[display] || display);
+  const title = display === 'needs_data' ? `Needs new test data${reason ? `: ${reason}` : ''}` : reason;
+  return `<span class="badge ${esc(display)}"${title ? ` title="${esc(title)}"` : ''}>${esc(label)}</span>`;
+}
+
 function renderCaseList() {
   const ul = $('#case-list');
   if (!S.cases.length) { ul.innerHTML = '<li class="none">No test cases yet. Upload an Excel to begin.</li>'; return; }
   ul.innerHTML = S.cases.map(c => {
     const on = S.sel && S.sel.suite_id === c.suite_id && S.sel.case_id === c.case_id;
-    const badge = c.last_run ? `<span class="badge ${c.last_run.status}">${c.last_run.status}</span>`
+    const badge = c.last_run ? statusBadge(c.last_run.display, c.last_run.needs_data, true)
       : c.recorded ? '<span class="badge recorded">recorded</span>' : '<span class="badge new">new</span>';
     return `<li class="${on ? 'on' : ''}" data-suite="${esc(c.suite_id)}" data-case="${esc(c.case_id)}">
       <div class="cid"><span>${esc(c.case_id)}</span>${badge}</div>
       <div class="ctitle">${esc(c.title)}</div>
-      <div class="cfile">${esc(c.filename)} · ${c.steps} steps${c.created_by ? ` · ${esc(c.created_by)}` : ''}</div></li>`;
+      <div class="cfile">${esc(c.filename)} · ${c.steps} steps${c.created_by ? ` · ${esc(c.created_by)}` : ''}${resultDots(c.recent)}</div></li>`;
   }).join('');
   ul.querySelectorAll('li[data-suite]').forEach(li => li.onclick = () => selectCase(li.dataset.suite, li.dataset.case));
 }
@@ -464,8 +480,9 @@ function renderTab() {
       <tbody>${runs.map(r => `<tr>
         <td class="mono">${esc(r.id)}</td>
         <td>${esc(fmtDate(r.started_at))}</td>
-        <td>${esc(r.run_by || '–')}</td>
-        <td><span class="badge ${r.status}">${r.status}</span>${r.stopped_by ? ` <span class="by">by ${esc(r.stopped_by)}</span>` : ''}</td>
+        <td>${esc(r.run_by || '–')}${r.by_admin ? ' <span class="chip" title="Started by an admin, not by a tester">admin run</span>' : ''}</td>
+        <td>${statusBadge(r.display || r.status, r.needs_data)}${r.stopped_by ? ` <span class="by">by ${esc(r.stopped_by)}</span>` : ''}
+          ${r.needs_data ? `<div class="faint need-why">${esc(r.needs_data)}</div>` : ''}</td>
         <td>${r.passed ?? 0} passed · ${r.failed ?? 0} failed · ${r.skipped ?? 0} skipped</td>
         <td>${secs(r.duration_ms)}</td>
         <td style="text-align:right;white-space:nowrap">
@@ -570,10 +587,16 @@ function renderRunForm() {
   const data = {};
   c.steps.forEach(s => Object.entries(s.data).forEach(([k, v]) => { if (!(k in data)) data[k] = v; }));
   S.runFormInfo = { defaults: data, linked };
+  // Start from the newest passing run's values, not the recording's: the recording used those up.
+  const { defaults: last = {}, used = {} } = S.detail.run_form || {};
+  const start = Object.fromEntries(Object.keys(data).map(k => [k, last[k] ? last[k].value : data[k]]));
+  const fromRun = Object.values(last)[0];
   const keys = Object.keys(data).sort((a, b) => linked.has(b) - linked.has(a));
   slot.innerHTML = `<div class="card run-form">
     <h3>Run ${esc(c.id)} automatically</h3>
-    <div class="muted">Values come from the Excel. Change them here to try the same automation with different data.</div>
+    <div class="muted">${fromRun ? `Values as in the last passing run (${esc(fmtDate(fromRun.at))}, ${esc(fromRun.by || '–')}).`
+      : 'Values as recorded.'} Change them here to try the same automation with different data.
+      Values that something like an invoice or requisition number uses up are marked when they were used before.</div>
     <div class="opts">
       <label><input type="checkbox" id="opt-headed" checked> Show the browser while it runs</label>
       <label>Speed <select id="opt-speed"><option value="0">Fast</option><option value="250" selected>Normal</option><option value="700">Slow (demo)</option></select></label>
@@ -581,11 +604,35 @@ function renderRunForm() {
     <div class="notice warn" style="margin:0 0 14px">This runs against the real application at <b>${esc(S.detail.target.url)}</b>: anything the test does (such as saving a record) really happens.</div>
     ${keys.length ? `<div class="data-grid">${keys.map(k => `
       <label for="d-${esc(k)}">${esc(k)}${linked.has(k) ? '' : ' <span class="chip">not used</span>'}</label>
-      <input id="d-${esc(k)}" data-key="${esc(k)}" value="${esc(data[k])}" type="${/pass/i.test(k) ? 'password' : 'text'}">`).join('')}</div>` : ''}
+      <div><input id="d-${esc(k)}" data-key="${esc(k)}" value="${esc(start[k])}" type="${/pass/i.test(k) ? 'password' : 'text'}">
+        <div class="used-hint" id="u-${esc(k)}" hidden></div></div>`).join('')}</div>` : ''}
     <div class="foot"><button class="btn" id="rf-cancel">Cancel</button><button class="btn primary" id="rf-start">▶ Start run</button></div>
   </div>`;
   $('#rf-cancel').onclick = () => { S.runForm = false; renderRunForm(); };
   $('#rf-start').onclick = startRun;
+  slot.querySelectorAll('[data-key]').forEach(inp => {
+    if (!used[inp.dataset.key]) return;
+    inp.addEventListener('input', () => usedHint(inp, used[inp.dataset.key]));
+    usedHint(inp, used[inp.dataset.key]);
+  });
+}
+
+// Under a run form field: this value was used before, by the recording or a passing run. For an invoice
+// number or a requisition that means it is used up, so the run would fail; offer a value that is new each run.
+function usedHint(inp, history) {
+  const box = document.getElementById(`u-${inp.dataset.key}`);
+  const v = inp.value.trim();
+  const hit = /\{(now|date|time|stamp)\}/.test(v) ? null : [...history].reverse().find(h => h.value === v);
+  box.hidden = !hit;
+  if (!hit) return;
+  const where = hit.what === 'recording' ? 'while recording' : 'by the passing run';
+  const base = v.replace(/[_-]?\d+$/, '');
+  const unique = /[A-Za-z]/.test(v) ? `${base || v}_{stamp}` : '';
+  box.innerHTML = `Already used ${where} on ${esc(fmtDate(hit.at))}${hit.by ? ` (${esc(hit.by)})` : ''}. If each run uses
+    it up (an invoice or order number, a requisition), give a new one.
+    ${unique ? `<button type="button" class="link-btn">Use “${esc(unique)}” (new every run)</button>` : ''}`;
+  const btn = box.querySelector('button');
+  if (btn) btn.onclick = () => { inp.value = unique; usedHint(inp, history); };
 }
 
 // ------------------------------------------------------------------ live panel
@@ -738,7 +785,8 @@ function renderActivity(main) {
 }
 
 // ------------------------------------------------------------------ admin overview
-const STATUS_LABEL = { new: 'not recorded', recorded: 'recorded, not run', passed: 'passed', failed: 'failed', stopped: 'stopped', running: 'running' };
+const STATUS_LABEL = { new: 'not recorded', recorded: 'recorded, not run', passed: 'passed', failed: 'failed',
+  needs_data: 'needs new test data', stopped: 'stopped', running: 'running' };
 
 async function showAdmin() {
   S.admin = await api('/api/admin/overview');
@@ -760,6 +808,7 @@ function renderAdmin(main) {
     ['Recorded', tests.filter(t => t.recorded_by || t.status !== 'new').length, ''],
     ['Last run passed', count('passed'), 'passed'],
     ['Last run failed', count('failed'), 'failed'],
+    ['Needs new test data', count('needs_data'), 'needs_data'],
     ['Not recorded yet', count('new'), ''],
     ['Runs in total', tests.reduce((n, t) => n + t.runs, 0), ''],
   ];
@@ -810,9 +859,9 @@ function renderAdminTests() {
         <div class="faint">${t.source === 'recording' ? 'Recorded without Excel' : esc(t.filename)} · ${t.steps} steps</div></td>
       <td>${t.created_by ? esc(t.created_by) : '<span class="faint">before sign-in</span>'}<div class="faint">${esc(fmtDate(t.created_at))}</div></td>
       <td>${t.recorded_at ? `${esc(t.recorded_by || '–')}<div class="faint">${esc(fmtDate(t.recorded_at))}${t.recording_warnings ? ` · ${t.recording_warnings} warning(s)` : ''}</div>` : '<span class="faint">–</span>'}</td>
-      <td>${t.runs ? `${t.runs}<div class="faint">${t.passed} passed · ${t.failed} failed</div>` : '<span class="faint">0</span>'}</td>
-      <td>${t.last_run ? `${esc(t.last_run.run_by || '–')}<div class="faint">${esc(fmtDate(t.last_run.started_at))} · ${secs(t.last_run.duration_ms)}</div>` : '<span class="faint">–</span>'}</td>
-      <td><span class="badge ${esc(t.status)}">${esc(STATUS_LABEL[t.status] || t.status)}</span></td></tr>`).join('')
+      <td>${t.runs ? `${t.runs}<div class="faint">${t.passed} passed · ${t.failed} failed${t.needs_data ? ` · ${t.needs_data} needed new data` : ''}</div>` : '<span class="faint">0</span>'}</td>
+      <td>${t.last_run ? `${esc(t.last_run.run_by || '–')}${t.last_run.by_admin ? ' <span class="chip">admin</span>' : ''}<div class="faint">${esc(fmtDate(t.last_run.started_at))} · ${secs(t.last_run.duration_ms)}</div>` : '<span class="faint">–</span>'}</td>
+      <td>${statusBadge(t.status, t.last_run && t.last_run.needs_data)}${resultDots(t.recent)}</td></tr>`).join('')
     : '<tr><td colspan="6" class="empty-box">No test cases match.</td></tr>';
   body.querySelectorAll('[data-open]').forEach(tr => tr.onclick = () => {
     const [suite, kase] = tr.dataset.open.split('|');

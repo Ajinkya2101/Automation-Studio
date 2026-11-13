@@ -329,7 +329,11 @@ def dashboard_check(suite_id, case_id):
         page = b.new_page()
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.goto(BASE + "/")
-        page.wait_for_function("typeof selectCase === 'function'")
+        # Polled from here: the dashboard's Content-Security-Policy forbids the eval that wait_for_function uses.
+        for _ in range(100):
+            if page.evaluate("() => typeof selectCase === 'function'"):
+                break
+            page.wait_for_timeout(100)
         page.evaluate("([s, c]) => selectCase(s, c)", [suite_id, case_id])
         page.evaluate("() => { S.tab = 'recording'; renderMain(); }")
         page.wait_for_selector("[data-tp-del]")

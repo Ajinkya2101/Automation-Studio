@@ -69,10 +69,14 @@ ORACLE_MSG_JS = r"""() => {
     if (!shown(d)) continue;
     const t = (d.innerText || '').replace(/\s+/g, ' ').trim();
     const m = t.match(code);
-    if (m) return t.slice(Math.max(0, m.index - 220), m.index + m[0].length).trim();
+    if (m) return {text: t.slice(Math.max(0, m.index - 220), m.index + m[0].length).trim(), code: m[1],
+                   error: /^Error\b/.test(t)};
   }
   return null;
 }"""
+# Failures that new test data fixes: the application says a value is taken.
+DUPLICATE = re.compile(r"already exists|already (an?|the) \w+ with (that|this|the same)|must enter a different|"
+                       r"is already (used|in use|assigned)|duplicate", re.I)
 
 
 def _numbers_only_differ(a: str, b: str) -> list[tuple[str, str]]:
@@ -639,11 +643,15 @@ def _undone_picks(page: Page, picked: list[dict], a: dict, data: dict) -> list[s
     fails much later, at whatever needed that choice, with an error that does not
     point at the cause. Each earlier choice is read again after every action, and
     one that changed is reported right there. A list that is no longer on the
-    page is not watched any more.
+    page is not watched any more, nor is a choice the recording itself changes
+    later (Shipping picks four values in turn in "Scheduled Ship Date Operator").
     """
     out = []
     for p in list(picked):
         if p["action"] is a:
+            continue
+        if a["type"] == "select" and _same_control(p["action"], a):
+            picked.remove(p)  # replaced by this choice in the same list, as recorded
             continue
         got = _selected(page, p["action"])
         if got is None:
@@ -1044,12 +1052,38 @@ def _page_errors(page: Page) -> str:
     return " | ".join(texts)[:300]
 
 
-def _oracle_message(page: Page) -> str | None:
-    """An Oracle message with an error code that is on screen now, e.g. "... (EGO-2745049)"."""
+def _oracle_message(page: Page) -> dict | None:
+    """An Oracle message with a code that is on screen now: {text: "... (EGO-2745049)", code, error}.
+    error: it is an Error, not a Warning or Confirmation."""
     try:
         return page.evaluate(ORACLE_MSG_JS)
     except Exception:
         return None
+
+
+def _recorded_texts(recording: dict) -> str:
+    """Everything the recording's actions name, to tell whether it met an application message itself."""
+    return " ".join(" ".join([a.get("target", ""), a.get("text", "")] + [c.get("value", "") for c in a.get("locators", [])
+                                                                       if c.get("kind") != "css"])
+                    for s in recording["steps"] for a in s["actions"]).lower()
+
+
+def _expected(message: dict, recorded: str) -> bool:
+    """The recording dealt with this message (clicked it, closed it): it is part of the process."""
+    body = re.sub(r"^(Error|Warning)\s+", "", message["text"])[:40].lower()
+    return message["code"].lower() in recorded or (len(body) >= 20 and body in recorded)
+
+
+def needs_new_data(error: str, empty: str = "") -> str:
+    """Why a failure is the test data's, not the test's: '' when it is not."""
+    if empty:
+        return f"The search found nothing (\"{empty}\"): the record in the test data was probably used up."
+    if "offers nothing to choose" in error:
+        return "Nothing was left to pick for this record: it probably already has it."
+    m = DUPLICATE.search(error)
+    if m:
+        return "The application says a value in the test data is already used, e.g. an invoice or order number."
+    return ""
 
 
 def _empty_list(page: Page) -> str:
@@ -1093,13 +1127,16 @@ def run_session(session: Session, suite: dict, case: dict, recording: dict,
     target_url = recording.get("start_url", "")
     names = {s["step_id"]: s["name"] for s in case["steps"]}
     shown_data = mask_data(test_data)
+    # As typed in the run form, {stamp} and the like not yet filled in: the next run form starts from it.
+    typed = {k: v for s in case["steps"] for k, v in s["data"].items()}
+    typed.update({k: v for k, v in (data or {}).items() if v is not None})
 
     # environment and test_data (passwords masked) are for the issue log: which device, versions and values.
     run = {"id": run_id, "suite_id": suite["id"], "case_id": case["id"], "title": case["title"],
            "started_at": storage.now_iso(), "finished_at": None, "status": "running",
            "run_by": session.user, "headed": headed, "slow_mo": slow_mo, "data_overrides": sorted((data or {}).keys()),
            "recorded_at": recording.get("recorded_at"), "start_url": target_url,
-           "environment": environment(), "test_data": shown_data,
+           "environment": environment(), "test_data": shown_data, "test_data_typed": mask_data(typed),
            "steps": [{"step_id": s["step_id"], "name": names.get(s["step_id"], s["name"]),
                       "status": "pending", "actions": len(s["actions"])} for s in recording["steps"]]}
     storage.save_run(run)
@@ -1191,6 +1228,7 @@ def _run_steps(session: Session, run: dict, recording: dict, test_data: dict, pa
     """
     log = session.log
     changes = list(changes or [])
+    recorded = _recorded_texts(recording)
     run_id = run["id"]
     rdir = storage.run_dir(run_id)
     trace = trace or {"on": False, "paused": False}
@@ -1209,6 +1247,7 @@ def _run_steps(session: Session, run: dict, recording: dict, test_data: dict, pa
         t_step = time.time()
         done, checks, error, diag, a = 0, [], None, None, None
         said, last_said = [], None  # Oracle messages with an error code seen during this step
+        errors = []  # ... of them, the Errors the recording did not meet itself
         try:
             for a in rstep["actions"]:
                 if session.stop_event.is_set():
@@ -1246,7 +1285,9 @@ def _run_steps(session: Session, run: dict, recording: dict, test_data: dict, pa
                     message = _oracle_message(page) if a["type"] not in ("scroll", "goto") else None
                     if message and message != last_said:
                         said.append(message)
-                        warn(f"The application shows a message: \"{message}\"")
+                        if message["error"] and not _expected(message, recorded):
+                            errors.append(message)
+                        warn(f"The application shows a message: \"{message['text']}\"")
                     last_said = message
                     if a["type"] == "select":
                         shown = _selected(page, a)
@@ -1271,6 +1312,13 @@ def _run_steps(session: Session, run: dict, recording: dict, test_data: dict, pa
                          ms=int((time.time() - t_act) * 1000), locator=used,
                          level="warn" if cand else "info",
                          note="primary locator not found; used a fallback" if cand else "")
+            if errors:
+                # The clicks went on, but the application refused what the step does (a duplicate invoice
+                # number): the step did not do its job, whatever the later clicks found.
+                raise StepFailed(
+                    f"The application reported an error during this step: \"{errors[0]['text']}\". The recorded "
+                    "actions went on, but what this step does was probably not done. The recording did not meet "
+                    "this error, so it is not part of the process.")
             status = "passed"
         except Stopped:
             status, stopped, error = "stopped", True, "Stopped by user"
@@ -1281,13 +1329,16 @@ def _run_steps(session: Session, run: dict, recording: dict, test_data: dict, pa
             diag = {"error": error_details(exc),
                     "action": {k: v for k, v in a.items() if k in ("type", "target", "locators", "tab", "frame",
                                                                     "param", "navigates")}}
-            shown = _page_errors(page) or _oracle_message(page) or ""
-            if shown:
+            shown = _page_errors(page) or (_oracle_message(page) or {}).get("text") or ""
+            if shown and shown in error:
+                pass  # already quoted (an error that failed the step)
+            elif shown:
                 res["app_message"] = shown
                 error = error.rstrip(".") + f". Application shows: {shown}"
-            elif said:
-                res["app_message"] = said[-1]
-                error = error.rstrip(".") + f". Earlier in this step the application said: \"{said[-1]}\""
+            elif said and said[-1]["text"] not in error:
+                res["app_message"] = said[-1]["text"]
+                error = error.rstrip(".") + f". Earlier in this step the application said: \"{said[-1]['text']}\""
+            empty = ""
             if undone:
                 error = error.rstrip(".") + f". Likely cause, earlier in the run: {undone[-1]}"
             elif "Could not find" in error:
@@ -1297,6 +1348,10 @@ def _run_steps(session: Session, run: dict, recording: dict, test_data: dict, pa
                         f". The page shows \"{empty}\": what this step looks for is not in the list. If the "
                         "recording or an earlier run already used it up (approved, processed, shipped), run with "
                         "test data for one that is still open.")
+            # A used-up record or a number already taken: the test is fine, its data is not.
+            reason = needs_new_data(error, empty)
+            if reason:
+                res["needs_data"] = run["needs_data"] = reason
             # The live log and the issue log get the whole explanation, not only the automation's error.
             diag["error"]["message"] = error
             log.emit("action", error, step_id=sid, idx=idx, status="fail", level="error")
