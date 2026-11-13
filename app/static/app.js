@@ -317,16 +317,6 @@ function applyEvent(L, ev) {
 }
 
 // ------------------------------------------------------------------ render: sidebar
-// The last few results of a test, oldest first: ✓ passed, ✗ failed, ! needs new test data, ■ stopped.
-// An admin's run is drawn hollow, so it is told apart from the testers' runs.
-function resultDots(recent) {
-  if (!recent || !recent.length) return '';
-  const mark = { passed: '✓', failed: '✗', needs_data: '!', stopped: '■', running: '…' };
-  return `<span class="dots">${recent.map(r => `<span class="dot ${esc(r.display)}${r.by_admin ? ' admin' : ''}"
-    title="${esc(STATUS_LABEL[r.display] || r.display)} · ${esc(fmtDate(r.started_at))} · ${esc(r.run_by || '–')}${r.by_admin ? ' (admin run)' : ''}${r.needs_data ? `
-${esc(r.needs_data)}` : ''}">${mark[r.display] || '·'}</span>`).join('')}</span>`;
-}
-
 function statusBadge(display, reason, short = false) {
   const label = short && display === 'needs_data' ? 'needs data' : (STATUS_LABEL[display] || display);
   const title = display === 'needs_data' ? `Needs new test data${reason ? `: ${reason}` : ''}` : reason;
@@ -343,7 +333,7 @@ function renderCaseList() {
     return `<li class="${on ? 'on' : ''}" data-suite="${esc(c.suite_id)}" data-case="${esc(c.case_id)}">
       <div class="cid"><span>${esc(c.case_id)}</span>${badge}</div>
       <div class="ctitle">${esc(c.title)}</div>
-      <div class="cfile">${esc(c.filename)} · ${c.steps} steps${c.created_by ? ` · ${esc(c.created_by)}` : ''}${resultDots(c.recent)}</div></li>`;
+      <div class="cfile">${esc(c.filename)} · ${c.steps} steps${c.created_by ? ` · ${esc(c.created_by)}` : ''}</div></li>`;
   }).join('');
   ul.querySelectorAll('li[data-suite]').forEach(li => li.onclick = () => selectCase(li.dataset.suite, li.dataset.case));
 }
@@ -861,7 +851,7 @@ function renderAdminTests() {
       <td>${t.recorded_at ? `${esc(t.recorded_by || '–')}<div class="faint">${esc(fmtDate(t.recorded_at))}${t.recording_warnings ? ` · ${t.recording_warnings} warning(s)` : ''}</div>` : '<span class="faint">–</span>'}</td>
       <td>${t.runs ? `${t.runs}<div class="faint">${t.passed} passed · ${t.failed} failed${t.needs_data ? ` · ${t.needs_data} needed new data` : ''}</div>` : '<span class="faint">0</span>'}</td>
       <td>${t.last_run ? `${esc(t.last_run.run_by || '–')}${t.last_run.by_admin ? ' <span class="chip">admin</span>' : ''}<div class="faint">${esc(fmtDate(t.last_run.started_at))} · ${secs(t.last_run.duration_ms)}</div>` : '<span class="faint">–</span>'}</td>
-      <td>${statusBadge(t.status, t.last_run && t.last_run.needs_data)}${resultDots(t.recent)}</td></tr>`).join('')
+      <td>${statusBadge(t.status, t.last_run && t.last_run.needs_data)}</td></tr>`).join('')
     : '<tr><td colspan="6" class="empty-box">No test cases match.</td></tr>';
   body.querySelectorAll('[data-open]').forEach(tr => tr.onclick = () => {
     const [suite, kase] = tr.dataset.open.split('|');

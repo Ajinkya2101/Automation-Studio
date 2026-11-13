@@ -303,21 +303,10 @@ table.grid { width: 100%; border-collapse: collapse; }
 .tp-tools .btn.small { padding: 0 7px; font-size: 11px; line-height: 18px; opacity: .75; }
 .act:hover .tp-tools .btn.small { opacity: 1; }
 
-/* Used-up test data and the last few results */
+/* Used-up test data */
 .badge.needs_data { background: #fff4db; color: #92580b; }
 .stat.needs_data b { color: #b26b05; }
-.dots { display: inline-flex; gap: 3px; margin-left: 8px; vertical-align: middle; }
-.dot { display: inline-grid; place-items: center; width: 15px; height: 15px; border-radius: 4px; font-size: 10px;
        font-weight: 700; line-height: 1; color: #fff; background: var(--faint); }
-.dot.passed { background: var(--pass); }
-.dot.failed { background: var(--fail); }
-.dot.needs_data { background: #d38b0d; }
-.dot.stopped { background: var(--warn); }
-.dot.admin { background: transparent; border: 1.5px solid currentColor; }
-.dot.admin.passed { color: var(--pass); }
-.dot.admin.failed { color: var(--fail); }
-.dot.admin.needs_data { color: #d38b0d; }
-.dot.admin.stopped { color: var(--warn); }
 .need-why { font-size: 12px; margin-top: 2px; max-width: 360px; }
 .used-hint { font-size: 12px; color: #92580b; background: #fff8e6; border-radius: 6px; padding: 4px 8px; margin-top: 4px; }
 .used-hint .link-btn { font-size: 12px; }

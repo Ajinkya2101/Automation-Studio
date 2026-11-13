@@ -289,7 +289,7 @@ def main():
         if shots:
             page.screenshot(path=f"{shots}/admin.png", full_page=True)
         b.close()
-    check(dots >= 3 and badge >= 1, f"the test list shows result dots ({dots}) and 'needs new test data' ({badge})")
+    check(dots == 0 and badge >= 1, f"the test list shows 'needs new test data' ({badge}) and no result markers ({dots})")
     check(first == "regr_pp_{stamp}", f"the form shows the last passing run's value: {first}")
     check(shown, "a value used before is marked under the field")
     check(unique == "test_inv_{stamp}" and hidden_after, f"... with a value that is new every run: {unique}")
