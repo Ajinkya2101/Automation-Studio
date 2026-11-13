@@ -414,34 +414,15 @@ function applyEvent(L, ev) {
   }
 }
 
-// ------------------------------------------------------------------ proof
-// Why a passing run of this recording would not prove the test worked (same rule as results.proof_gaps).
-function proofGaps(rec) {
-  if (!rec) return [];
-  const steps = rec.steps || [];
-  const gaps = [];
-  if (!steps.some(s => (s.actions || []).some(a => a.type === 'expect_text'))) {
-    gaps.push('Nothing is checked: no step has a check, so a run only shows that the clicks happened, not that the result appeared.');
-  }
-  const empty = steps.filter(s => !(s.actions || []).length).map(s => s.step_id);
-  if (empty.length) {
-    gaps.push(`${plural(empty.length, 'step')} did nothing when recorded (${empty.join(', ')}), so ${empty.length === 1 ? 'it passes' : 'they pass'} without doing anything.`);
-  }
-  return gaps;
-}
-
-const isUnproven = run => !!(run && run.status === 'passed' && S.detail && S.detail.recording
-  && (S.detail.recording.recorded_at || '') <= (run.started_at || '') && proofGaps(S.detail.recording).length);
-
-const viewStatus = run => isUnproven(run) ? 'unproven' : (run.display || run.status);
+const viewStatus = run => run.display || run.status;
 const shortDate = iso => iso ? new Date(iso).toLocaleDateString([], { day: 'numeric', month: 'short' }) : '';
 // Engine wording the consultant does not need.
 const plainError = s => String(s || '').replace(/\s*\(tried (\d+) locator\(s\)\)/g, (m, n) => ` (looked for it ${n} ways)`);
 
 // ------------------------------------------------------------------ render: sidebar
-const STATUS_LABEL = { new: 'not recorded', recorded: 'recorded, not run', passed: 'passed', unproven: 'passed, not proven',
+const STATUS_LABEL = { new: 'not recorded', recorded: 'recorded, not run', passed: 'passed',
   failed: 'failed', needs_data: 'needs new test data', stopped: 'stopped', running: 'running' };
-const SHORT_LABEL = { needs_data: 'needs new data', unproven: 'not proven' };
+const SHORT_LABEL = { needs_data: 'needs new data' };
 
 function statusBadge(display, reason, short = false) {
   const label = (short && SHORT_LABEL[display]) || STATUS_LABEL[display] || display;
@@ -458,8 +439,7 @@ function renderCaseList() {
   const shown = q ? S.cases.filter(c => `${c.case_id} ${c.title} ${c.filename} ${c.created_by || ''}`.toLowerCase().includes(q)) : S.cases;
   ul.innerHTML = shown.map(c => {
     const on = !!(S.sel && S.sel.suite_id === c.suite_id && S.sel.case_id === c.case_id);
-    const badge = c.last_run ? statusBadge(c.unproven ? 'unproven' : c.last_run.display,
-        c.unproven ? 'The last run passed, but the recording checks nothing or has empty steps' : c.last_run.needs_data, true)
+    const badge = c.last_run ? statusBadge(c.last_run.display, c.last_run.needs_data, true)
       : c.recorded ? '<span class="badge recorded">recorded</span>' : '<span class="badge new">new</span>';
     return `<li><button type="button" data-act="open-case" data-suite="${esc(c.suite_id)}" data-case="${esc(c.case_id)}" aria-current="${on}" title="${esc(c.title)}">
       <span class="cid"><span>${esc(c.case_id)}</span>${badge}</span>
@@ -707,12 +687,6 @@ function diagnose(run) {
   const reason = plainError(cut > 0 ? err.slice(cut + 2) : err);
   const firstSentence = reason.split(/(?<=\.)\s/)[0];
   if (status === 'passed') {
-    if (isUnproven(run)) {
-      return { kind: 'unproven', icon: 'warn', title: `Passed, but not proven: all ${plural(n, 'step')} ran`,
-        why: 'This only shows that the recorded clicks happened:', gaps: proofGaps(S.detail.recording),
-        what: 'Record the test again and use <b>+ Add check</b> on text that proves each step worked, such as the email in Sent Items.',
-        action: { act: 'record', label: 'Re-record with checks' } };
-    }
     return { kind: 'passed', icon: 'check', title: `Passed: all ${plural(n, 'step')} worked`,
       why: `Ran in ${secs(run.duration_ms)}${run.run_by ? `, started by ${esc(run.run_by)}` : ''}.` };
   }
@@ -784,7 +758,7 @@ function renderVerdict(run, { live = false } = {}) {
     d.action = null;
     d.secondary = null;
   }
-  const issue = run.id && d.kind !== 'passed' && d.kind !== 'unproven'
+  const issue = run.id && d.kind !== 'passed'
     ? `<a href="/api/runs/${esc(run.id)}/issue-log">${icon('download')} Issue log: the evidence to send a developer</a>` : '';
   let compare = '';
   if (d.step && d.kind !== 'passed') {
@@ -802,7 +776,6 @@ function renderVerdict(run, { live = false } = {}) {
     <div class="verdict-head"><span class="vi" aria-hidden="true">${icon(d.icon, 18)}</span><div>
       <h2>${d.title}</h2>
       ${d.why ? `<p class="why">${d.why}</p>` : ''}
-      ${d.gaps ? `<ul class="gaps">${d.gaps.map(g => `<li>${esc(g)}</li>`).join('')}</ul>` : ''}
       ${d.what ? `<p class="what">${d.what}</p>` : ''}
       ${history}
     </div></div>
@@ -1139,13 +1112,6 @@ function renderLog(ev) {
 function renderSummary(L) {
   const s = L.summary;
   if (!s || L.kind !== 'record') return '';
-  const gaps = L.done ? proofGaps(S.detail && S.detail.recording) : [];
-  if (gaps.length) {
-    return `<div class="summary unproven">${icon('warn')}<div><b>Recording saved, but a run of it won't prove much yet:</b>
-      <ul class="gaps">${gaps.map(g => `<li>${esc(g)}</li>`).join('')}</ul></div>
-      <button class="btn small primary" data-act="record" data-needs-idle ${S.session ? 'disabled' : ''}>Record again with checks</button>
-      <button class="btn small" data-act="open-run-form" data-needs-idle ${S.session ? 'disabled' : ''}>Run it anyway</button></div>`;
-  }
   return `<div class="summary passed">${icon('check')} ${esc(s.message)} <button class="btn small primary" data-act="open-run-form" data-needs-idle ${S.session ? 'disabled' : ''}>${icon('play', 14)} Run it automatically</button></div>`;
 }
 
@@ -1258,12 +1224,11 @@ async function showAdmin() {
 function renderAdmin(main) {
   const { tests, users, active } = S.admin;
   const F = S.adminFilter;
-  tests.forEach(t => { t.view = t.unproven ? 'unproven' : t.status; });
+  tests.forEach(t => { t.view = t.status; });
   const count = st => tests.filter(t => t.view === st).length;
   const filters = [
     ['', 'test cases', tests.length],
     ['passed', 'last run passed', count('passed')],
-    ['unproven', 'passed, not proven', count('unproven')],
     ['failed', 'last run failed', count('failed')],
     ['needs_data', 'needs new test data', count('needs_data')],
     ['new', 'not recorded yet', count('new')],

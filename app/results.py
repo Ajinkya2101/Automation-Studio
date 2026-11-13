@@ -17,26 +17,6 @@ def display_status(run: dict) -> str:
     return run.get("status") or ""
 
 
-def proof_gaps(recording: dict | None) -> list[str]:
-    """Why a passing run of this recording would not prove the test worked: nothing is checked,
-    or steps have no actions. Same rule as the dashboard's verdict (app.js proofGaps)."""
-    if not recording:
-        return []
-    steps = recording.get("steps") or []
-    gaps = []
-    if not any(a.get("type") == "expect_text" for s in steps for a in s.get("actions") or []):
-        gaps.append("no_checks")
-    if any(not s.get("actions") for s in steps):
-        gaps.append("empty_steps")
-    return gaps
-
-
-def unproven(run: dict | None, recording: dict | None) -> bool:
-    """A passed run of a recording that checks nothing (or skips steps), recorded before the run."""
-    return bool(run and run.get("status") == "passed" and proof_gaps(recording)
-                and (recording.get("recorded_at") or "") <= (run.get("started_at") or ""))
-
-
 def summary(run: dict) -> dict:
     """A run as the test list and history show it."""
     by = run.get("run_by")
